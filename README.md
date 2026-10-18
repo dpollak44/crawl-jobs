@@ -56,14 +56,14 @@ Local development without containers: `docker compose up db broker`, then `dotne
 
 ### Code layout
 
-| Project                      | Role                                                                                                                                                                                        |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/Crawler.Domain`         | The rules: URL normalization, same-site scope, link extraction, ratio, job/page state. No database, no network, no web. Unit-tested in isolation.                                           |
-| `src/Crawler.Infrastructure` | Postgres (EF Core) and RabbitMQ: table mapping, queue topology, the message contract, shared host defaults (JSON logs, health checks). Shared by API and worker so they can never disagree. |
-| `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                               |
-| `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                               |
-| `src/web` | React + Vite + TypeScript, one page: history first, a New crawl form in place, the selected job beside it with live progress and the tree. Structure: `api/` (client + types), `hooks/` (`useJob` live stream with polling fallback, `useHistory`, `useTree`), `components/`, `pages/Dashboard`, `lib/format`. Plain CSS with design tokens, no UI framework. |
-| `tests/*`                    | 83 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
+| Project                      | Role                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/Crawler.Domain`         | The rules: URL normalization, same-site scope, link extraction, ratio, job/page state. No database, no network, no web. Unit-tested in isolation.                                                                                                                                                                                                             |
+| `src/Crawler.Infrastructure` | Postgres (EF Core) and RabbitMQ: table mapping, queue topology, the message contract, shared host defaults (JSON logs, health checks). Shared by API and worker so they can never disagree.                                                                                                                                                                   |
+| `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                                                                                                                                                                                                 |
+| `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                                                                                                                                                                                                 |
+| `src/web`                    | React + Vite + TypeScript, one page: history first, a New crawl form in place, the selected job beside it with live progress and the tree. Structure: `api/` (client + types), `hooks/` (`useJob` live stream with polling fallback, `useHistory`, `useTree`), `components/`, `pages/Dashboard`, `lib/format`. Plain CSS with design tokens, no UI framework. |
+| `tests/*`                    | 83 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                                                                                                                                                                                            |
 
 Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
 replaced, without starting anything.
@@ -105,7 +105,9 @@ notification is dropped. Every stream also re-reads on its own every 10 s in cas
 failure to announce is logged and never fails the page.
 
 If the stream cannot be opened or drops, the page falls back to polling every two seconds, which stays in
-the code as the safety net. A production gateway must not buffer this endpoint (the response sets
+the code as the safety net, and the stream is reopened once the API answers again (after at least ten
+seconds in polling, so a flapping API does not cause a reconnect storm): recovery returns the page to live
+mode without a reload. A production gateway must not buffer this endpoint (the response sets
 `X-Accel-Buffering: no`).
 
 ## Crawling rules
