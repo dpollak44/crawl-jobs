@@ -231,7 +231,7 @@ Three tables. Every timestamp is UTC.
 
 | Table   | Key columns                                                                                                                                               | Why                                                                           |
 | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `jobs`  | `Id`, `InputUrl`, `StartHost`, `MaxDepth`, `MaxPages`, `Status`, `PagesDiscovered` (cap counter, concurrency token), timestamps, `FailureReason`          | A job owns its own limits; changing a default later never changes an old job. |
+| `jobs`  | `Id`, `InputUrl`, `StartHost`, `MaxDepth`, `MaxPages`, `Status`, `PagesDiscovered` (cap counter, raised only by a conditional update), timestamps, `FailureReason`; `Status` is the concurrency token          | A job owns its own limits; changing a default later never changes an old job. |
 | `pages` | `Id`, `JobId`, `Url` (normalized), `Depth`, `ParentPageId` (first discovery), `Status`, `FinalUrl`, `HttpStatus`, link counts, `DomainLinkRatio`, `Error` | One row per page per job. Written at discovery, completed at fetch.           |
 | `links` | `Id`, `JobId`, `ParentPageId`, `ChildUrl`, `IsInternal`                                                                                                   | Every outgoing link, the evidence behind each ratio.                          |
 

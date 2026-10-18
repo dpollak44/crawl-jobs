@@ -69,8 +69,11 @@ public static class JobEndpoints
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, "Job {JobId} could not be scheduled: broker unavailable", job.Id);
-            job.MarkFailed("Could not schedule the crawl: the message broker is unavailable. Try again in a minute.", clock.GetUtcNow());
+            logger.LogError(ex, "Job {JobId} could not be scheduled", job.Id);
+            var reason = ex is UnroutableMessageException
+                ? "Could not schedule the crawl: the message broker had no worker queue to deliver to. Check that a worker is running, then try again."
+                : "Could not schedule the crawl: the message broker is unavailable. Try again in a minute.";
+            job.MarkFailed(reason, clock.GetUtcNow());
             seed.MarkFailed("Never scheduled: the message broker was unavailable.", null, clock.GetUtcNow()); // nothing left Queued: the screen settles
             await db.SaveChangesAsync(CancellationToken.None);
         }
