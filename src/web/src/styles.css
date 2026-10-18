@@ -1,0 +1,29 @@
+/* Clarity over design, as the brief asks. One font, one accent, readable states. */
+:root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #1f2328; background: #fff; }
+body { margin: 0; }
+header { display: flex; align-items: baseline; gap: 1.5rem; padding: 1rem 1.5rem; border-bottom: 1px solid #d0d7de; }
+header h1 { font-size: 1.25rem; margin: 0; }
+nav a { margin-right: 1rem; }
+main { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
+.stack > * + * { margin-top: 1rem; }
+label { display: block; font-weight: 600; }
+input { display: block; margin-top: 0.25rem; padding: 0.5rem; width: 100%; max-width: 32rem; font: inherit; border: 1px solid #d0d7de; border-radius: 4px; }
+button { padding: 0.5rem 1rem; font: inherit; border: 1px solid #1f6feb; background: #1f6feb; color: #fff; border-radius: 4px; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+.error { color: #b42318; }
+.muted { color: #57606a; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+.facts dt { font-weight: 600; }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+progress { width: 100%; max-width: 32rem; }
+.status { display: inline-block; padding: 0 0.5rem; border-radius: 999px; font-size: 0.85rem; background: #eaeef2; }
+.status-running { background: #ddf4ff; color: #0969da; }
+.status-completed, .status-fetched { background: #dafbe1; color: #1a7f37; }
+.status-failed { background: #ffebe9; color: #b42318; }
+.status-canceled, .status-skipped { background: #fff8c5; color: #7d4e00; }
+.tree, .tree ul { list-style: none; padding-left: 1.25rem; border-left: 1px solid #d0d7de; }
+.tree { padding-left: 0; border-left: 0; }
+.tree li { margin: 0.25rem 0; overflow-wrap: anywhere; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #d0d7de; }
+code { font-size: 0.9em; }

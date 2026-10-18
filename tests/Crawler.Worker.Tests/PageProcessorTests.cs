@@ -144,7 +144,7 @@ public class PageProcessorTests : IDisposable
     [Fact]
     public async Task A_redirect_off_the_site_is_recorded_as_skipped_not_crawled()
     {
-        _h.Site.Redirect("https://shop.test/moved", "https://elsewhere.test/landing", "leaf.html");
+        _h.Site.Redirect("https://shop.test/moved", "https://elsewhere.test/landing").Html("https://elsewhere.test/landing", "leaf.html");
         var (job, _) = await _h.StartJobAsync("https://shop.test/moved");
 
         await _h.DrainAsync();
@@ -154,6 +154,37 @@ public class PageProcessorTests : IDisposable
         page.Status.ShouldBe(PageStatus.Skipped);
         page.Error.ShouldNotBeNull().ShouldContain("elsewhere.test");
         (await db.Links.CountAsync(l => l.JobId == job.Id)).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_redirect_on_the_same_host_is_followed_even_from_https_to_http_and_the_final_url_recorded()
+    {
+        _h.Site.Redirect("https://shop.test/old", "http://shop.test/new/").Html("http://shop.test/new/", "leaf.html");
+        var (job, _) = await _h.StartJobAsync("https://shop.test/old");
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(PageStatus.Fetched);
+        page.FinalUrl.ShouldBe("http://shop.test/new/");
+        _h.Site.Requests.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task A_redirect_loop_gives_up_after_the_cap()
+    {
+        _h.Site.Redirect("https://shop.test/a", "https://shop.test/b").Redirect("https://shop.test/b", "https://shop.test/a");
+        _h.Options.MaxRedirects = 3;
+        var (job, _) = await _h.StartJobAsync("https://shop.test/a");
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(PageStatus.Failed);
+        page.Error.ShouldNotBeNull().ShouldContain("redirects");
+        _h.Site.Requests.ShouldBe(4); // 1 + 3 hops
     }
 
     [Fact]

@@ -35,14 +35,14 @@ public sealed class FakeSite : HttpMessageHandler
         return this;
     }
 
-    /// <summary>Simulates an already-followed redirect: the client asked for `from` and ended at `to` with that page's content.</summary>
-    public FakeSite Redirect(string from, string to, string fixtureFile)
+    /// <summary>A real 3xx reply: the fetcher must follow it (or refuse it) itself.</summary>
+    public FakeSite Redirect(string from, string to, HttpStatusCode status = HttpStatusCode.PermanentRedirect)
     {
-        var html = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureFile));
-        _replies[from] = () => new HttpResponseMessage(HttpStatusCode.OK)
+        _replies[from] = () =>
         {
-            Content = new StringContent(html, System.Text.Encoding.UTF8, "text/html"),
-            RequestMessage = new HttpRequestMessage(HttpMethod.Get, to),
+            var response = new HttpResponseMessage(status);
+            response.Headers.Location = new Uri(to);
+            return response;
         };
         return this;
     }

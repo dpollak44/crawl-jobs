@@ -17,8 +17,7 @@ builder.Services.AddHttpClient<PageFetcher>(c =>
     })
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
     {
-        AllowAutoRedirect = true,
-        MaxAutomaticRedirections = crawl.MaxRedirects,
+        AllowAutoRedirect = false, // PageFetcher follows redirects itself: same-host http/https hops allowed, final URL recorded, hops capped
         PooledConnectionLifetime = TimeSpan.FromMinutes(2),
     })
     .AddStandardResilienceHandler(o =>
