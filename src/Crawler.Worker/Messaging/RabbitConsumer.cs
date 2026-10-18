@@ -48,7 +48,7 @@ public sealed class RabbitConsumer(
                 return;
             }
 
-            using var _ = logger.BeginScope(new Dictionary<string, object> { ["JobId"] = message.JobId, ["PageId"] = message.PageId, ["Attempt"] = message.Attempt });
+            using var logScope = logger.BeginScope(new Dictionary<string, object> { ["JobId"] = message.JobId, ["PageId"] = message.PageId, ["Attempt"] = message.Attempt });
             ProcessResult result;
             try
             {

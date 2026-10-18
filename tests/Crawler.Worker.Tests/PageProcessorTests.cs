@@ -1,0 +1,190 @@
+using Crawler.Domain.Model;
+using Crawler.Infrastructure.Messaging;
+using Crawler.Worker.Crawling;
+using Microsoft.EntityFrameworkCore;
+
+namespace Crawler.Worker.Tests;
+
+/// <summary>
+/// The integration-style test the brief asks for: the worker's whole page step against local HTML fixtures,
+/// a fake internet and an in-memory queue. The site: home → about, products, contact(404), brochure.pdf,
+/// offsite partner; about → team; products → widget, about (already known).
+/// </summary>
+public class PageProcessorTests : IDisposable
+{
+    private readonly WorkerHarness _h = new();
+
+    public PageProcessorTests()
+    {
+        _h.Site
+            .Html("https://shop.test/", "home.html")
+            .Html("https://shop.test/about", "about.html")
+            .Html("https://shop.test/products", "products.html")
+            .Html("https://shop.test/team", "leaf.html")
+            .Html("https://shop.test/widget", "leaf.html")
+            .Reply("https://shop.test/brochure.pdf", System.Net.HttpStatusCode.OK, "application/pdf", "%PDF-1.4")
+            .Reply("https://shop.test/contact", System.Net.HttpStatusCode.NotFound);
+    }
+
+    public void Dispose() => _h.Dispose();
+
+    [Fact]
+    public async Task A_whole_crawl_completes_with_the_right_tree_and_ratios()
+    {
+        var (job, _) = await _h.StartJobAsync("https://shop.test/", maxDepth: 2);
+
+        var processed = await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var saved = await db.Jobs.SingleAsync(j => j.Id == job.Id);
+        var pages = await db.Pages.Where(p => p.JobId == job.Id).OrderBy(p => p.Depth).ThenBy(p => p.Url).ToListAsync();
+
+        saved.Status.ShouldBe(JobStatus.Completed);
+        saved.StartedAt.ShouldNotBeNull();
+        saved.CompletedAt.ShouldNotBeNull();
+        processed.ShouldBe(pages.Count); // one message per page, every page handled exactly once
+
+        pages.Select(p => (p.Url, p.Depth, p.Status)).ShouldBe(
+        [
+            ("https://shop.test/", 0, PageStatus.Fetched),
+            ("https://shop.test/about", 1, PageStatus.Fetched),
+            ("https://shop.test/brochure.pdf", 1, PageStatus.Skipped),
+            ("https://shop.test/contact", 1, PageStatus.Failed),
+            ("https://shop.test/products", 1, PageStatus.Fetched),
+            ("https://shop.test/team", 2, PageStatus.Fetched),
+            ("https://shop.test/widget", 2, PageStatus.Fetched),
+        ]);
+
+        var home = pages.Single(p => p.Depth == 0);
+        home.OutgoingLinks.ShouldBe(5);          // about, products, contact, brochure.pdf, partner (mailto ignored, self ignored)
+        home.InternalLinks.ShouldBe(4);
+        home.DomainLinkRatio.ShouldBe(0.8m);
+
+        var products = pages.Single(p => p.Url == "https://shop.test/products");
+        products.OutgoingLinks.ShouldBe(2);      // widget, about
+        products.DomainLinkRatio.ShouldBe(1m);
+
+        // "about" was first discovered from home, not from products: one parent, one tree shape.
+        pages.Single(p => p.Url == "https://shop.test/about").ParentPageId.ShouldBe(home.Id);
+        pages.Single(p => p.Url == "https://shop.test/widget").ParentPageId.ShouldBe(products.Id);
+
+        // The off-site link is recorded as an edge but never became a page.
+        var edges = await db.Links.Where(l => l.JobId == job.Id).ToListAsync();
+        edges.ShouldContain(e => e.ChildUrl == "https://partner.example.org/" && !e.IsInternal);
+        pages.ShouldNotContain(p => p.Url.Contains("partner"));
+    }
+
+    [Fact]
+    public async Task Delivering_the_same_message_twice_creates_no_duplicate_rows()
+    {
+        var (job, seed) = await _h.StartJobAsync("https://shop.test/", maxDepth: 1);
+        var seedMessage = _h.Queue.Pending.Dequeue();
+
+        (await _h.ProcessAsync(seedMessage)).Outcome.ShouldBe(ProcessOutcome.Done);
+        await using (var db = _h.Db())
+        {
+            var pagesAfterFirst = await db.Pages.CountAsync(p => p.JobId == job.Id);
+            var linksAfterFirst = await db.Links.CountAsync(l => l.JobId == job.Id);
+            var publishedAfterFirst = _h.Queue.AllPublished.Count;
+
+            (await _h.ProcessAsync(seedMessage)).Outcome.ShouldBe(ProcessOutcome.Done);
+
+            (await db.Pages.CountAsync(p => p.JobId == job.Id)).ShouldBe(pagesAfterFirst);
+            (await db.Links.CountAsync(l => l.JobId == job.Id)).ShouldBe(linksAfterFirst);
+            _h.Site.Requests.ShouldBe(1); // the page was not fetched again
+
+            // The duplicate re-scheduled the still-queued children (harmless, and self-healing if a publish was lost).
+            _h.Queue.AllPublished.Count.ShouldBeGreaterThan(publishedAfterFirst);
+            _h.Queue.AllPublished.Skip(publishedAfterFirst).ShouldAllBe(m => m.JobId == job.Id && m.Depth == 1);
+        }
+
+        seed.Id.ShouldNotBe(Guid.Empty);
+    }
+
+    [Fact]
+    public async Task Depth_limit_stops_discovery_but_still_records_links()
+    {
+        var (job, _) = await _h.StartJobAsync("https://shop.test/", maxDepth: 0);
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        (await db.Pages.CountAsync(p => p.JobId == job.Id)).ShouldBe(1);
+        (await db.Links.CountAsync(l => l.JobId == job.Id)).ShouldBe(5);
+        (await db.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Completed);
+    }
+
+    [Fact]
+    public async Task Page_cap_is_respected()
+    {
+        var (job, _) = await _h.StartJobAsync("https://shop.test/", maxDepth: 2, maxPages: 3);
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        (await db.Pages.CountAsync(p => p.JobId == job.Id)).ShouldBe(3);
+        var saved = await db.Jobs.SingleAsync(j => j.Id == job.Id);
+        saved.PagesDiscovered.ShouldBe(3);
+        saved.Status.ShouldBe(JobStatus.Completed);
+    }
+
+    [Fact]
+    public async Task A_seed_that_cannot_be_fetched_fails_the_job_with_the_reason()
+    {
+        var (job, _) = await _h.StartJobAsync("https://shop.test/contact");
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var saved = await db.Jobs.SingleAsync(j => j.Id == job.Id);
+        saved.Status.ShouldBe(JobStatus.Failed);
+        saved.FailureReason.ShouldNotBeNull().ShouldContain("HTTP 404");
+    }
+
+    [Fact]
+    public async Task A_redirect_off_the_site_is_recorded_as_skipped_not_crawled()
+    {
+        _h.Site.Redirect("https://shop.test/moved", "https://elsewhere.test/landing", "leaf.html");
+        var (job, _) = await _h.StartJobAsync("https://shop.test/moved");
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(PageStatus.Skipped);
+        page.Error.ShouldNotBeNull().ShouldContain("elsewhere.test");
+        (await db.Links.CountAsync(l => l.JobId == job.Id)).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_message_for_an_unknown_job_is_poison()
+    {
+        var result = await _h.ProcessAsync(new CrawlPageMessage(Guid.NewGuid(), Guid.NewGuid(), "https://shop.test/", 0));
+
+        result.Outcome.ShouldBe(ProcessOutcome.Poison);
+        result.Reason.ShouldNotBeNull().ShouldContain("does not exist");
+    }
+
+    [Fact]
+    public async Task A_canceled_job_stops_fetching_its_remaining_pages()
+    {
+        var (job, _) = await _h.StartJobAsync("https://shop.test/", maxDepth: 1);
+        var seedMessage = _h.Queue.Pending.Dequeue();
+        await _h.ProcessAsync(seedMessage); // discovers 4 children
+
+        await using (var db = _h.Db())
+        {
+            var j = await db.Jobs.SingleAsync(x => x.Id == job.Id);
+            j.Cancel(DateTimeOffset.UtcNow).IsSuccess.ShouldBeTrue();
+            await db.SaveChangesAsync();
+        }
+
+        var requestsBefore = _h.Site.Requests;
+        await _h.DrainAsync();
+
+        _h.Site.Requests.ShouldBe(requestsBefore); // nothing else was fetched
+        await using var check = _h.Db();
+        (await check.Pages.CountAsync(p => p.JobId == job.Id && p.Status == PageStatus.Skipped)).ShouldBe(4);
+        (await check.Jobs.SingleAsync(x => x.Id == job.Id)).Status.ShouldBe(JobStatus.Canceled);
+    }
+}

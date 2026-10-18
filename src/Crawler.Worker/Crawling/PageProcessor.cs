@@ -138,7 +138,7 @@ public sealed class PageProcessor(
         }
 
         var candidates = internalLinks.Select(l => l.ToString()).Distinct().ToList();
-        var known = await db.Pages.Where(p => p.JobId == job.Id && candidates.Contains(p.Url)).Select(p => p.Url).ToHashSetAsync(ct);
+        var known = (await db.Pages.Where(p => p.JobId == job.Id && candidates.Contains(p.Url)).Select(p => p.Url).ToListAsync(ct)).ToHashSet(StringComparer.Ordinal);
 
         foreach (var url in candidates)
         {
