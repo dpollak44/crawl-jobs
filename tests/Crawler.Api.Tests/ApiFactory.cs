@@ -21,6 +21,11 @@ public sealed class RecordingPublisher : IPagePublisher
     }
 }
 
+public sealed class NoopAnnouncer : IProgressAnnouncer
+{
+    public Task AnnounceAsync(Guid jobId, CancellationToken ct) => Task.CompletedTask;
+}
+
 /// <summary>Boots the real API in-process: SQLite in-memory instead of Postgres, a recording publisher instead of RabbitMQ.</summary>
 public sealed class ApiFactory : WebApplicationFactory<Program>
 {
@@ -40,6 +45,9 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.AddDbContext<AppDbContext>(o => o.UseSqlite(_connection));
             services.RemoveAll<IPagePublisher>();
             services.AddSingleton<IPagePublisher>(Publisher);
+            services.RemoveAll<IProgressAnnouncer>();
+            services.AddSingleton<IProgressAnnouncer, NoopAnnouncer>();
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>(); // no broker in tests: no listener
         });
     }
 

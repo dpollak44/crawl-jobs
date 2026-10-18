@@ -25,6 +25,17 @@ public sealed class InMemoryQueue : IPagePublisher
     }
 }
 
+public sealed class RecordingAnnouncer : IProgressAnnouncer
+{
+    public List<Guid> Announced { get; } = [];
+
+    public Task AnnounceAsync(Guid jobId, CancellationToken ct)
+    {
+        Announced.Add(jobId);
+        return Task.CompletedTask;
+    }
+}
+
 /// <summary>
 /// Everything the worker needs, with the two outside dependencies replaced: a SQLite in-memory database
 /// instead of Postgres, and <see cref="FakeSite"/> instead of the internet. A fresh DbContext per message,
@@ -37,6 +48,7 @@ public sealed class WorkerHarness : IDisposable
 
     public FakeSite Site { get; } = new();
     public InMemoryQueue Queue { get; } = new();
+    public RecordingAnnouncer Announcer { get; } = new();
     public CrawlOptions Options { get; } = new() { MaxBodyBytes = 1024 * 1024 };
     public DateTimeOffset Now { get; } = new(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
 
@@ -70,7 +82,7 @@ public sealed class WorkerHarness : IDisposable
         // The same resilience policy the worker runs with (see FetchPipeline), wrapped around the fake site.
         var http = new HttpClient(new ResilienceHandler(FetchPipeline.Build(Options)) { InnerHandler = Site }, disposeHandler: false);
         var fetcher = new PageFetcher(http, Microsoft.Extensions.Options.Options.Create(Options));
-        var processor = new PageProcessor(db, fetcher, Queue, Microsoft.Extensions.Options.Options.Create(Options), TimeProvider.System, NullLogger<PageProcessor>.Instance);
+        var processor = new PageProcessor(db, fetcher, Queue, Announcer, Microsoft.Extensions.Options.Options.Create(Options), TimeProvider.System, NullLogger<PageProcessor>.Instance);
         return await processor.ProcessAsync(message, CancellationToken.None);
     }
 

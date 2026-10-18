@@ -15,6 +15,14 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+// Live progress: the worker announces "job X changed" on a fanout; the listener hands it to the relay, which reads
+// the summary once and pushes it to every open stream for that job.
+builder.Services.AddSingleton(sp => new ProgressRelay(async (jobId, ct) =>
+{
+    await using var scope = sp.CreateAsyncScope();
+    return await JobEndpoints.LoadSummaryAsync(scope.ServiceProvider.GetRequiredService<Crawler.Infrastructure.Persistence.AppDbContext>(), jobId, ct);
+}));
+builder.Services.AddHostedService<ProgressListener>();
 builder.Services.Configure<CrawlOptions>(builder.Configuration.GetSection(CrawlOptions.Section));
 builder.Services.AddSingleton<IValidator<CreateJobRequest>>(sp =>
 {

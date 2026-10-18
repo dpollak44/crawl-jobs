@@ -39,7 +39,8 @@ public class JobStreamTests : IClassFixture<ApiFactory>
         lines[0].ShouldStartWith("data: ");
         lines[0].ShouldContain("\"status\":\"Pending\"");
 
-        // 2. the worker (simulated) runs and completes the job
+        // 2. the worker (simulated) runs and completes the job, announcing "go look" after each change as the real worker does
+        var relay = _factory.Services.GetRequiredService<ProgressRelay>();
         using (var scope = _factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -47,10 +48,12 @@ public class JobStreamTests : IClassFixture<ApiFactory>
             var seed = await db.Pages.SingleAsync(p => p.JobId == jobId, cts.Token);
             job.MarkRunning(DateTimeOffset.UtcNow);
             await db.SaveChangesAsync(cts.Token);
-            await Task.Delay(1300, cts.Token);
+            (await relay.NotifyAsync(jobId, cts.Token)).ShouldBeTrue("the open stream should be subscribed");
+            await Task.Delay(300, cts.Token);
             seed.MarkFetched(new Uri("https://stream.example.com/"), 200, 0, 0, 0m, DateTimeOffset.UtcNow);
             job.MarkCompleted(DateTimeOffset.UtcNow);
             await db.SaveChangesAsync(cts.Token);
+            await relay.NotifyAsync(jobId, cts.Token);
         }
 
         // 3. read until the stream ends

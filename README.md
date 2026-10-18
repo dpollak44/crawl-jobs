@@ -85,9 +85,19 @@ Errors follow Problem Details: `400` names the field and says what to change; `4
 
 `GET /api/jobs/{id}/events` streams the job summary as Server-Sent Events: the current summary on connect, a
 line whenever it changes, then `event: done` once the job is final and nothing is queued. The job page opens
-one stream and the browser does not poll; the API re-reads the summary once a second per open stream. If the
-stream cannot be opened or drops, the page falls back to polling every two seconds, which stays in the code
-as the safety net. A production gateway must not buffer this endpoint (the response sets
+one stream and the browser does not poll.
+
+How a change reaches the stream: after the worker settles a page (and after cancel), it publishes "job X
+changed" to a fanout exchange, `crawl.progress`. The announcement carries no data, only "go look"; the
+database stays the only source of truth, so an announcement delivered twice costs one harmless extra read.
+Each API instance binds its own exclusive, auto-delete queue to that fanout, so several API instances scale
+out with nothing to coordinate, and the queue vanishes with the instance. On a notification the API reads the
+summary **once** per job, however many streams are open for it, and pushes it to each; with no open stream the
+notification is dropped. Every stream also re-reads on its own every 10 s in case an announcement was lost. A
+failure to announce is logged and never fails the page.
+
+If the stream cannot be opened or drops, the page falls back to polling every two seconds, which stays in
+the code as the safety net. A production gateway must not buffer this endpoint (the response sets
 `X-Accel-Buffering: no`).
 
 ## Crawling rules

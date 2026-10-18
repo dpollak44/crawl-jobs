@@ -22,11 +22,15 @@ public static class RabbitTopology
     public const string DeadQueue = "crawl.pages.dead";
     public const string RoutingKey = "page";
 
+    /// <summary>Fanout for "job X changed" notifications: no data, just "go look". Each API instance binds its own auto-delete queue.</summary>
+    public const string ProgressExchange = "crawl.progress";
+
     public static async Task DeclareAsync(IChannel channel, int retryDelayMs, CancellationToken ct)
     {
         await channel.ExchangeDeclareAsync(WorkExchange, ExchangeType.Direct, durable: true, autoDelete: false, cancellationToken: ct);
         await channel.ExchangeDeclareAsync(RetryExchange, ExchangeType.Direct, durable: true, autoDelete: false, cancellationToken: ct);
         await channel.ExchangeDeclareAsync(DeadExchange, ExchangeType.Direct, durable: true, autoDelete: false, cancellationToken: ct);
+        await channel.ExchangeDeclareAsync(ProgressExchange, ExchangeType.Fanout, durable: true, autoDelete: false, cancellationToken: ct);
 
         await channel.QueueDeclareAsync(WorkQueue, durable: true, exclusive: false, autoDelete: false,
             arguments: new Dictionary<string, object?> { ["x-dead-letter-exchange"] = DeadExchange }, cancellationToken: ct);

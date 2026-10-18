@@ -86,11 +86,14 @@ public static class JobEndpoints
     private static readonly JsonSerializerOptions SseJson = new(JsonSerializerDefaults.Web);
 
     /// <summary>
-    /// Live progress over Server-Sent Events. The browser stops polling; the API reads the summary once a second
-    /// per open stream and writes a line only when something changed. Ends with `event: done` once the job is final
-    /// and no page is still queued. A closed browser cancels the request and ends the loop.
+    /// Live progress over Server-Sent Events. The browser stops polling. The stream writes the summary on connect,
+    /// then whenever the relay pushes a change (the worker announced "job X changed" and the relay read the summary
+    /// once for every open stream), with a safety re-read every 10 s in case an announcement was lost. Ends with
+    /// `event: done` once the job is final and no page is still queued. A closed browser cancels the request.
     /// </summary>
-    private static async Task StreamAsync(Guid id, HttpContext http, AppDbContext db, CancellationToken ct)
+    private static readonly TimeSpan SafetyReread = TimeSpan.FromSeconds(10);
+
+    private static async Task StreamAsync(Guid id, HttpContext http, AppDbContext db, ProgressRelay relay, CancellationToken ct)
     {
         var current = await LoadSummaryAsync(db, id, ct);
         if (current is null)
@@ -105,6 +108,8 @@ public static class JobEndpoints
         http.Response.Headers.Connection = "keep-alive";
         http.Response.Headers["X-Accel-Buffering"] = "no"; // tell a reverse proxy not to buffer this response
 
+        var (updates, subscription) = relay.Subscribe(id);
+        using var _ = subscription;
         string? lastSent = null;
         try
         {
@@ -126,11 +131,20 @@ public static class JobEndpoints
                     return;
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(1), ct);
-                current = await LoadSummaryAsync(db, id, ct);
-                if (current is null)
+                // Wait for the worker to say "go look", or re-read anyway after SafetyReread in case an announcement was lost.
+                using var waitClock = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                waitClock.CancelAfter(SafetyReread);
+                try
                 {
-                    return; // job deleted underneath us: nothing more to say
+                    current = await updates.ReadAsync(waitClock.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    current = await LoadSummaryAsync(db, id, ct);
+                    if (current is null)
+                    {
+                        return; // job deleted underneath us: nothing more to say
+                    }
                 }
             }
         }
@@ -140,7 +154,7 @@ public static class JobEndpoints
         }
     }
 
-    private static async Task<JobSummary?> LoadSummaryAsync(AppDbContext db, Guid id, CancellationToken ct)
+    internal static async Task<JobSummary?> LoadSummaryAsync(AppDbContext db, Guid id, CancellationToken ct)
     {
         var job = await db.Jobs.AsNoTracking().FirstOrDefaultAsync(j => j.Id == id, ct);
         if (job is null)
@@ -199,7 +213,7 @@ public static class JobEndpoints
         return TypedResults.Ok(nodes[root.Id]);
     }
 
-    private static async Task<Results<Ok<JobSummary>, NotFound, ProblemHttpResult>> CancelAsync(Guid id, AppDbContext db, TimeProvider clock, CancellationToken ct)
+    private static async Task<Results<Ok<JobSummary>, NotFound, ProblemHttpResult>> CancelAsync(Guid id, AppDbContext db, TimeProvider clock, IProgressAnnouncer announcer, CancellationToken ct)
     {
         var job = await db.Jobs.FirstOrDefaultAsync(j => j.Id == id, ct);
         if (job is null)
@@ -214,6 +228,7 @@ public static class JobEndpoints
         }
 
         await db.SaveChangesAsync(ct);
+        await announcer.AnnounceAsync(job.Id, CancellationToken.None);
         return TypedResults.Ok(ToSummary(job, []));
     }
 

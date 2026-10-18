@@ -31,6 +31,7 @@ public sealed class PageProcessor(
     AppDbContext db,
     PageFetcher fetcher,
     IPagePublisher publisher,
+    IProgressAnnouncer announcer,
     IOptions<CrawlOptions> options,
     TimeProvider clock,
     ILogger<PageProcessor> logger)
@@ -136,6 +137,7 @@ public sealed class PageProcessor(
             page.Id, page.Status, page.Depth, page.OutgoingLinks, page.InternalLinks, page.DomainLinkRatio, children.Count);
 
         await CompleteIfFinishedAsync(job, ct);
+        await announcer.AnnounceAsync(job.Id, ct); // "go look": the page settled and maybe the job finished
         return new ProcessResult(ProcessOutcome.Done);
     }
 
@@ -163,6 +165,7 @@ public sealed class PageProcessor(
         await db.SaveChangesAsync(ct);
         logger.LogError("Page {PageId} marked Failed after {Attempt} attempts: {Reason}", page.Id, message.Attempt, reason);
         await CompleteIfFinishedAsync(job, ct);
+        await announcer.AnnounceAsync(job.Id, ct);
     }
 
     private async Task<List<CrawlPage>> DiscoverChildrenAsync(CrawlJob job, CrawlPage parent, List<Uri> internalLinks, CancellationToken ct)

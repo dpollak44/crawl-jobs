@@ -40,6 +40,7 @@ public static class ServiceDefaults
         builder.Services.AddSingleton<RabbitConnection>();
         builder.Services.AddSingleton<RabbitPagePublisher>();
         builder.Services.AddSingleton<IPagePublisher>(sp => sp.GetRequiredService<RabbitPagePublisher>());
+        builder.Services.AddSingleton<IProgressAnnouncer, RabbitProgressAnnouncer>();
 
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddHealthChecks()

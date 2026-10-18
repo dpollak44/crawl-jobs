@@ -43,6 +43,7 @@ public class PageProcessorTests : IDisposable
         saved.StartedAt.ShouldNotBeNull();
         saved.CompletedAt.ShouldNotBeNull();
         processed.ShouldBe(pages.Count); // one message per page, every page handled exactly once
+        _h.Announcer.Announced.Count(id => id == job.Id).ShouldBe(pages.Count); // one "go look" per settled page
 
         pages.Select(p => (p.Url, p.Depth, p.Status)).ShouldBe(
         [
@@ -203,7 +204,7 @@ public class PageProcessorTests : IDisposable
 
         await using (var db = _h.Db())
         {
-            var processor = new PageProcessor(db, new PageFetcher(new HttpClient(_h.Site, false), Microsoft.Extensions.Options.Options.Create(_h.Options)), _h.Queue,
+            var processor = new PageProcessor(db, new PageFetcher(new HttpClient(_h.Site, false), Microsoft.Extensions.Options.Options.Create(_h.Options)), _h.Queue, _h.Announcer,
                 Microsoft.Extensions.Options.Options.Create(_h.Options), TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<PageProcessor>.Instance);
             await processor.GiveUpAsync(last with { Attempt = 3 }, "database unreachable", CancellationToken.None);
         }
