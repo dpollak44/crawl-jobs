@@ -1,60 +1,30 @@
-using Crawler.Api.Claims;
-using Crawler.Api.Data;
 using Crawler.Api.Errors;
-using Crawler.Api.FileImports;
-using Crawler.Api.Outbound;
-using FluentValidation;
+using Crawler.Infrastructure;
 using Microsoft.AspNetCore.HttpLogging;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Http.Resilience;
-using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.AddCrawlerDefaults();
 
-// Logs: one JSON line per event outside Development (what Application Insights / any log shipper wants).
-if (!builder.Environment.IsDevelopment())
-{
-    builder.Logging.ClearProviders().AddJsonConsole();
-}
-
-// Request log: method, path, status, duration. Never bodies or headers (PHI).
+// Request log: method, path, status, duration. Never bodies or headers.
 builder.Services.AddHttpLogging(o => o.LoggingFields = HttpLoggingFields.RequestMethod | HttpLoggingFields.RequestPath | HttpLoggingFields.ResponseStatusCode | HttpLoggingFields.Duration);
-
-builder.Services.AddOpenApi();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
-builder.Services.AddValidatorsFromAssemblyContaining<CreateClaimRequestValidator>();
-builder.Services.AddSingleton(TimeProvider.System);
 
-builder.Services.AddDbContext<AppDbContext>(o =>
-    o.UseSqlite(builder.Configuration.GetConnectionString("Default") ?? "Data Source=takehome.db"));
-builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>();
-
-// Outbound integration: retries with backoff, per-attempt timeout and a circuit breaker come from the
-// standard resilience handler; the numbers live in appsettings under "Resilience".
-builder.Services.AddHttpClient<PayerClient>(c => c.BaseAddress = new Uri(builder.Configuration["Payer:BaseUrl"] ?? "http://localhost:9999/"))
-    .AddStandardResilienceHandler()
-    .Configure(builder.Configuration.GetSection("Resilience"));
-builder.Services.AddScoped<OutboundDispatcher>();
+// The UI is served from its own address (static files at the edge in production), so the API must say which origins may call it.
+var uiOrigins = builder.Configuration.GetSection("Cors:Origins").Get<string[]>() ?? ["http://localhost:3000", "http://localhost:5173"];
+builder.Services.AddCors(o => o.AddDefaultPolicy(p => p.WithOrigins(uiOrigins).AllowAnyHeader().AllowAnyMethod()));
 
 var app = builder.Build();
-
-// Take-home scale: create the schema on boot. A real service runs EF migrations as a release step.
-using (var scope = app.Services.CreateScope())
-{
-    await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.EnsureCreatedAsync();
-}
+await app.EnsureDatabaseAsync();
 
 app.UseExceptionHandler();
 app.UseHttpLogging();
-
-app.MapOpenApi();
-app.MapScalarApiReference(); // interactive API page at /scalar
+app.UseCors();
+app.UseSwagger();
+app.UseSwaggerUI(); // interactive API page at /swagger
 app.MapHealthChecks("/health").WithTags("Ops");
-
-app.MapClaimEndpoints();
-app.MapImportEndpoints();
-app.MapOutboundEndpoints();
 
 await app.RunAsync();
 

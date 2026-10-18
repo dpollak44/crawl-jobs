@@ -1,16 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
-    <PackageReference Include="Scalar.AspNetCore" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
-    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" />
-    <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
+    <PackageReference Include="Swashbuckle.AspNetCore" />
     <PackageReference Include="FluentValidation.DependencyInjectionExtensions" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Crawler.Domain\Crawler.Domain.csproj" />
+    <ProjectReference Include="..\Crawler.Infrastructure\Crawler.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

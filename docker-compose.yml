@@ -1,0 +1,85 @@
+# One command runs the whole system: docker compose up --build
+# Start order is enforced by health checks, not by hope: the API and worker wait until Postgres and RabbitMQ answer.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: crawler
+      POSTGRES_PASSWORD: crawler
+      POSTGRES_DB: crawler
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crawler -d crawler"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  broker:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # management UI: http://localhost:15672 (guest/guest) — watch the queues and the dead-letter box
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      args:
+        PROJECT: Crawler.Api
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Default: Host=db;Port=5432;Database=crawler;Username=crawler;Password=crawler
+      RabbitMq__Host: broker
+      Cors__Origins__0: http://localhost:3000
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build:
+      context: .
+      args:
+        PROJECT: Crawler.Worker
+    environment:
+      ASPNETCORE_URLS: http://+:8081
+      ConnectionStrings__Default: Host=db;Port=5432;Database=crawler;Username=crawler;Password=crawler
+      RabbitMq__Host: broker
+    ports:
+      - "8081:8081"   # worker health: http://localhost:8081/health
+    depends_on:
+      api:
+        condition: service_healthy   # the API creates the schema; the worker starts after it exists
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build:
+      context: ./src/web
+      args:
+        VITE_API_URL: http://localhost:8080
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+volumes:
+  dbdata:

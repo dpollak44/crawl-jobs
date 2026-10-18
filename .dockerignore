@@ -3,3 +3,4 @@
 **/*.db
 .git/
 tests/
+src/web/node_modules/

@@ -1,20 +1,26 @@
-# Build
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# One recipe for both .NET services; PROJECT selects which one. Multi-stage: SDK to build, slim runtime to run.
+ARG PROJECT=Crawler.Api
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+ARG PROJECT
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Packages.props .editorconfig Crawler.sln ./
 COPY src/Crawler.Domain/Crawler.Domain.csproj src/Crawler.Domain/
+COPY src/Crawler.Infrastructure/Crawler.Infrastructure.csproj src/Crawler.Infrastructure/
 COPY src/Crawler.Api/Crawler.Api.csproj src/Crawler.Api/
-RUN dotnet restore src/Crawler.Api/Crawler.Api.csproj
-COPY src/ src/
-RUN dotnet publish src/Crawler.Api/Crawler.Api.csproj -c Release -o /app --no-restore
+COPY src/Crawler.Worker/Crawler.Worker.csproj src/Crawler.Worker/
+RUN dotnet restore src/${PROJECT}/${PROJECT}.csproj
+COPY src/Crawler.Domain/ src/Crawler.Domain/
+COPY src/Crawler.Infrastructure/ src/Crawler.Infrastructure/
+COPY src/Crawler.Api/ src/Crawler.Api/
+COPY src/Crawler.Worker/ src/Crawler.Worker/
+RUN dotnet publish src/${PROJECT}/${PROJECT}.csproj -c Release -o /app --no-restore
 
-# Run
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+ARG PROJECT
 WORKDIR /app
 COPY --from=build /app .
-ENV ASPNETCORE_URLS=http://+:8080
-ENV ConnectionStrings__Default="Data Source=/data/crawler.db"
-RUN mkdir -p /data && chown "$APP_UID" /data
+RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
 USER $APP_UID
-EXPOSE 8080
-ENTRYPOINT ["dotnet", "Crawler.Api.dll"]
+ENV PROJECT_DLL=${PROJECT}.dll
+ENTRYPOINT ["sh", "-c", "dotnet $PROJECT_DLL"]
