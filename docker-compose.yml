@@ -62,8 +62,7 @@ services:
       ASPNETCORE_URLS: http://+:8081
       ConnectionStrings__Default: Host=db;Port=5432;Database=crawler;Username=crawler;Password=crawler
       RabbitMq__Host: broker
-    ports:
-      - "8081:8081"   # worker health: http://localhost:8081/health
+    # No host port, so `docker compose up --scale worker=3` works. Health: docker compose exec worker wget -qO- http://localhost:8081/health
     depends_on:
       api:
         condition: service_healthy   # the API creates the schema; the worker starts after it exists

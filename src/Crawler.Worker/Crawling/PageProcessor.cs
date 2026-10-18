@@ -69,8 +69,11 @@ public sealed class PageProcessor(
 
         var fetch = await fetcher.FetchAsync(new Uri(page.Url), ct);
         var scope = new SiteScope(job.StartHost, options.Value.IncludeSubdomains);
+        var seed = new Uri(job.InputUrl);
         var children = new List<CrawlPage>();
 
+        // One transaction for the page, its links, the cap reservation and the new child rows: all or nothing.
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
             switch (fetch.Outcome)
@@ -89,7 +92,7 @@ public sealed class PageProcessor(
                         db.Links.Add(PageLink.Create(job.Id, page.Id, link, scope.Contains(link)));
                     }
 
-                    children = await DiscoverChildrenAsync(job, page, links.Where(scope.Contains).ToList(), ct);
+                    children = await DiscoverChildrenAsync(job, page, links.Where(scope.Contains).Select(l => scope.Canonicalize(l, seed)).ToList(), ct);
                     break;
 
                 case FetchOutcome.NotHtml:
@@ -107,11 +110,12 @@ public sealed class PageProcessor(
             }
 
             await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
         }
         catch (DbUpdateException ex)
         {
-            // Another worker discovered the same child page, or raised the cap counter, in the same instant.
-            // Nothing is lost: the message is retried and the second pass finds the rows already there.
+            // Another worker discovered the same child page in the same instant (unique index), or the job's
+            // status changed under us. Nothing is lost: the message is retried and the second pass finds the rows.
             logger.LogWarning(ex, "Concurrent write on job {JobId}; message will be retried", job.Id);
             return new ProcessResult(ProcessOutcome.Transient, "Concurrent write; retry.");
         }
@@ -165,26 +169,55 @@ public sealed class PageProcessor(
 
         var candidates = internalLinks.Select(l => l.ToString()).Distinct().ToList();
         var known = (await db.Pages.Where(p => p.JobId == job.Id && candidates.Contains(p.Url)).Select(p => p.Url).ToListAsync(ct)).ToHashSet(StringComparer.Ordinal);
+        var fresh = candidates.Where(u => !known.Contains(u)).ToList(); // already discovered via an earlier page: first parent wins
 
-        foreach (var url in candidates)
+        var granted = await ReservePagesAsync(job, fresh.Count, ct);
+        if (granted < fresh.Count)
         {
-            if (known.Contains(url))
-            {
-                continue; // already discovered via an earlier page: first parent wins
-            }
+            logger.LogInformation("Job {JobId} reached its page cap of {MaxPages}; {Dropped} link(s) not followed", job.Id, job.MaxPages, fresh.Count - granted);
+        }
 
-            if (!job.TryReservePage())
-            {
-                logger.LogInformation("Job {JobId} reached its page cap of {MaxPages}", job.Id, job.MaxPages);
-                break;
-            }
-
+        foreach (var url in fresh.Take(granted))
+        {
             var child = CrawlPage.Discover(job.Id, new Uri(url), parent.Depth + 1, parent.Id, clock.GetUtcNow());
             db.Pages.Add(child);
             children.Add(child);
         }
 
         return children;
+    }
+
+    /// <summary>
+    /// Raise the job's page counter by up to <paramref name="wanted"/> with one conditional UPDATE, so several
+    /// workers can reserve at once and the sum can never exceed MaxPages. Returns how many were granted.
+    /// </summary>
+    private async Task<int> ReservePagesAsync(CrawlJob job, int wanted, CancellationToken ct)
+    {
+        if (wanted == 0)
+        {
+            return 0;
+        }
+
+        var updated = await db.Jobs
+            .Where(j => j.Id == job.Id && j.PagesDiscovered + wanted <= j.MaxPages)
+            .ExecuteUpdateAsync(s => s.SetProperty(j => j.PagesDiscovered, j => j.PagesDiscovered + wanted), ct);
+        if (updated == 1)
+        {
+            return wanted;
+        }
+
+        // Not enough room for all of them: take whatever is left, if anything.
+        var current = await db.Jobs.Where(j => j.Id == job.Id).Select(j => j.PagesDiscovered).SingleAsync(ct);
+        var remaining = Math.Max(job.MaxPages - current, 0);
+        if (remaining == 0)
+        {
+            return 0;
+        }
+
+        updated = await db.Jobs
+            .Where(j => j.Id == job.Id && j.PagesDiscovered + remaining <= j.MaxPages)
+            .ExecuteUpdateAsync(s => s.SetProperty(j => j.PagesDiscovered, j => j.PagesDiscovered + remaining), ct);
+        return updated == 1 ? remaining : 0;
     }
 
     private async Task RescheduleQueuedChildrenAsync(CrawlJob job, CrawlPage page, CancellationToken ct)

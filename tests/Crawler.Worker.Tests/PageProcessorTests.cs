@@ -232,12 +232,12 @@ public class PageProcessorTests : IDisposable
             oldPage = children[0].Id;
             freshPage = children[1].Id;
             await db.Database.ExecuteSqlRawAsync("DELETE FROM links WHERE \"ParentPageId\" = {0}", oldPage); // a never-fetched page has no links yet
-            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"DiscoveredAt\" = {0} WHERE \"Id\" = {1}", (_h.Now - TimeSpan.FromMinutes(10)).UtcTicks, oldPage);
-            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"DiscoveredAt\" = {0} WHERE \"Id\" = {1}", _h.Now.UtcTicks, freshPage);
+            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"LastQueuedAt\" = {0} WHERE \"Id\" = {1}", (_h.Now - TimeSpan.FromMinutes(10)).UtcTicks, oldPage);
+            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"LastQueuedAt\" = {0} WHERE \"Id\" = {1}", _h.Now.UtcTicks, freshPage);
             await db.Database.ExecuteSqlRawAsync("UPDATE jobs SET \"Status\" = 'Running' WHERE \"Id\" = {0}", job.Id);
             // A page on a completed job must never be re-published, however old.
             var donePage = await db.Pages.SingleAsync(p => p.JobId == doneJob.Id);
-            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"DiscoveredAt\" = {0} WHERE \"Id\" = {1}", (_h.Now - TimeSpan.FromMinutes(10)).UtcTicks, donePage.Id);
+            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"LastQueuedAt\" = {0} WHERE \"Id\" = {1}", (_h.Now - TimeSpan.FromMinutes(10)).UtcTicks, donePage.Id);
         }
 
         int republished;
@@ -249,11 +249,50 @@ public class PageProcessorTests : IDisposable
         republished.ShouldBe(1);
         _h.Queue.AllPublished.Single().PageId.ShouldBe(oldPage);
 
+        // A second sweep in the same minute sends nothing: the page was stamped when it was re-published.
+        await using (var db = _h.Db())
+        {
+            (await QueuedPageSweeper.SweepOnceAsync(db, _h.Queue, _h.Now, TimeSpan.FromMinutes(2), CancellationToken.None)).ShouldBe(0);
+        }
+
         // And the re-published message completes the job through the normal path.
         await _h.DrainAsync();
         await using var check = _h.Db();
         (await check.Pages.SingleAsync(p => p.Id == oldPage)).Status.ShouldBe(PageStatus.Fetched);
         (await check.Pages.CountAsync(p => p.JobId == job.Id)).ShouldBe(5); // no duplicate rows
+    }
+
+    [Fact]
+    public async Task The_same_page_spelled_with_http_or_www_becomes_one_page_row()
+    {
+        _h.Site.Html("https://shop.test/spellings", "spellings.html").Html("https://shop.test/x", "leaf.html");
+        var (job, _) = await _h.StartJobAsync("https://shop.test/spellings", maxDepth: 1);
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var children = await db.Pages.Where(p => p.JobId == job.Id && p.Depth == 1).Select(p => p.Url).ToListAsync();
+        children.ShouldBe(["https://shop.test/x"]);                       // http://, www., and https:// spellings collapsed into the job's own
+        (await db.Links.CountAsync(l => l.JobId == job.Id)).ShouldBe(3); // but every link as written is still recorded as an edge
+        (await db.Pages.SingleAsync(p => p.Url == "https://shop.test/spellings")).DomainLinkRatio.ShouldBe(1m);
+    }
+
+    [Fact]
+    public async Task A_site_that_never_answers_is_recorded_as_unreachable_not_retried_through_the_queue()
+    {
+        _h.Options.FetchTimeoutSeconds = 1;
+        _h.Options.FetchRetries = 0;
+        _h.Site.Hang("https://shop.test/slow", TimeSpan.FromSeconds(5));
+        var (job, _) = await _h.StartJobAsync("https://shop.test/slow");
+
+        var result = await _h.ProcessAsync(_h.Queue.Pending.Dequeue());
+
+        result.Outcome.ShouldBe(ProcessOutcome.Done); // the site's problem, not ours: no queue retry
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(PageStatus.Failed);
+        page.Error.ShouldNotBeNull().ShouldContain("Timed out");
+        (await db.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Failed);
     }
 
     [Fact]

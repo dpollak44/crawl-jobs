@@ -47,11 +47,21 @@ public sealed class QueuedPageSweeper(IServiceScopeFactory scopes, IOptions<Craw
         var activeStatuses = new[] { JobStatus.Pending, JobStatus.Running };
 
         var stuck = await db.Pages.AsNoTracking()
-            .Where(p => p.Status == PageStatus.Queued && p.DiscoveredAt < cutoff)
+            .Where(p => p.Status == PageStatus.Queued && p.LastQueuedAt < cutoff)
             .Join(db.Jobs.Where(j => activeStatuses.Contains(j.Status)), p => p.JobId, j => j.Id, (p, j) => p)
-            .OrderBy(p => p.DiscoveredAt)
+            .OrderBy(p => p.LastQueuedAt)
             .Take(500)
             .ToListAsync(ct);
+
+        if (stuck.Count == 0)
+        {
+            return 0;
+        }
+
+        // Stamp first, then publish: another worker sweeping at the same moment will not re-send the same pages.
+        var ids = stuck.Select(p => p.Id).ToList();
+        await db.Pages.Where(p => ids.Contains(p.Id) && p.LastQueuedAt < cutoff)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.LastQueuedAt, now), ct);
 
         foreach (var page in stuck)
         {

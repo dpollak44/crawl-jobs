@@ -29,6 +29,25 @@ public sealed class SiteScope
         return IncludeSubdomains && host.EndsWith("." + Host, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// One page, one key: a same-site link spelled with the other scheme or with/without "www." is rewritten
+    /// to the job's own scheme and host before it becomes a page row. Off-site links are returned unchanged.
+    /// </summary>
+    public Uri Canonicalize(Uri link, Uri seed)
+    {
+        if (!Contains(link))
+        {
+            return link;
+        }
+
+        if (link.Scheme == seed.Scheme && string.Equals(link.Host, seed.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            return link;
+        }
+
+        return new UriBuilder(link) { Scheme = seed.Scheme, Host = seed.Host, Port = -1 }.Uri;
+    }
+
     private static string Strip(string host)
     {
         var h = host.Trim().ToLowerInvariant();

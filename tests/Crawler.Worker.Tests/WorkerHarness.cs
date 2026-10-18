@@ -5,6 +5,7 @@ using Crawler.Infrastructure.Persistence;
 using Crawler.Worker.Crawling;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -66,7 +67,8 @@ public sealed class WorkerHarness : IDisposable
     public async Task<ProcessResult> ProcessAsync(CrawlPageMessage message)
     {
         await using var db = Db();
-        var http = new HttpClient(Site, disposeHandler: false);
+        // The same resilience policy the worker runs with (see FetchPipeline), wrapped around the fake site.
+        var http = new HttpClient(new ResilienceHandler(FetchPipeline.Build(Options)) { InnerHandler = Site }, disposeHandler: false);
         var fetcher = new PageFetcher(http, Microsoft.Extensions.Options.Options.Create(Options));
         var processor = new PageProcessor(db, fetcher, Queue, Microsoft.Extensions.Options.Options.Create(Options), TimeProvider.System, NullLogger<PageProcessor>.Instance);
         return await processor.ProcessAsync(message, CancellationToken.None);

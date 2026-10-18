@@ -11,8 +11,8 @@ public enum JobStatus
 
 /// <summary>
 /// One crawl request. Owns its own limits (depth, page cap, start host) so a later change of defaults never
-/// changes the meaning of an old job. PagesDiscovered is the cap counter: raised only while below MaxPages,
-/// which is what stops several workers from slipping past the cap together.
+/// changes the meaning of an old job. PagesDiscovered is the cap counter; it is raised only by an atomic,
+/// conditional UPDATE in the worker, which is what stops several workers from slipping past the cap together.
 /// </summary>
 public sealed class CrawlJob
 {
@@ -101,15 +101,4 @@ public sealed class CrawlJob
 
     public bool IsTerminal => Status is JobStatus.Completed or JobStatus.Failed or JobStatus.Canceled;
 
-    /// <summary>Reserve one more page slot. Returns false when the cap is reached.</summary>
-    public bool TryReservePage()
-    {
-        if (PagesDiscovered >= MaxPages)
-        {
-            return false;
-        }
-
-        PagesDiscovered++;
-        return true;
-    }
 }

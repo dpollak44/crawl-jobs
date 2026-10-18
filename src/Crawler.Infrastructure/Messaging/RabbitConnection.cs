@@ -34,6 +34,7 @@ public sealed class RabbitConnection(IOptions<RabbitOptions> options) : IAsyncDi
                 UserName = o.User,
                 Password = o.Password,
                 AutomaticRecoveryEnabled = true,
+                ConsumerDispatchConcurrency = o.Prefetch, // handle up to Prefetch messages at once per worker
             };
             _connection = await factory.CreateConnectionAsync(ct);
 

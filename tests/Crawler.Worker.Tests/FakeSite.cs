@@ -47,12 +47,27 @@ public sealed class FakeSite : HttpMessageHandler
         return this;
     }
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    private readonly Dictionary<string, TimeSpan> _hangs = new(StringComparer.Ordinal);
+
+    /// <summary>A server that takes this long to answer (then answers 200). Used to exercise the timeout policy.</summary>
+    public FakeSite Hang(string url, TimeSpan delay)
+    {
+        _hangs[url] = delay;
+        return this;
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         Requests++;
         var key = request.RequestUri!.ToString();
+        if (_hangs.TryGetValue(key, out var delay))
+        {
+            await Task.Delay(delay, cancellationToken); // the per-attempt timeout cancels this
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<html></html>", System.Text.Encoding.UTF8, "text/html"), RequestMessage = request };
+        }
+
         var response = _replies.TryGetValue(key, out var make) ? make() : new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("not found") };
         response.RequestMessage ??= request;
-        return Task.FromResult(response);
+        return response;
     }
 }

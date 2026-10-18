@@ -32,9 +32,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             b.HasKey(j => j.Id);
             b.Property(j => j.InputUrl).HasMaxLength(2048).IsRequired();
             b.Property(j => j.StartHost).HasMaxLength(255).IsRequired();
-            b.Property(j => j.Status).HasConversion<string>().HasMaxLength(20);
+            b.Property(j => j.Status).HasConversion<string>().HasMaxLength(20).IsConcurrencyToken(); // a stale copy cannot overwrite a final status
             b.Property(j => j.FailureReason).HasMaxLength(1000);
-            b.Property(j => j.PagesDiscovered).IsConcurrencyToken(); // the cap counter: a stale writer loses, never overshoots
+            // The cap counter is only ever changed by an atomic UPDATE … WHERE PagesDiscovered + n <= MaxPages (PageProcessor),
+            // never by writing back an entity, so two workers can never both slip past the cap.
+            b.Property(j => j.PagesDiscovered).ValueGeneratedOnUpdate();
             b.HasIndex(j => j.CreatedAt).IsDescending();
         });
 

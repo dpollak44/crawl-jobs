@@ -2,6 +2,7 @@ using Crawler.Infrastructure;
 using Crawler.Worker.Crawling;
 using Crawler.Worker.Messaging;
 using Microsoft.Extensions.Http.Resilience;
+using Polly;
 
 // The worker is a web host too, for one reason: a /health endpoint the orchestrator can probe.
 var builder = WebApplication.CreateBuilder(args);
@@ -10,7 +11,7 @@ builder.Services.Configure<CrawlOptions>(builder.Configuration.GetSection(CrawlO
 
 var crawl = builder.Configuration.GetSection(CrawlOptions.Section).Get<CrawlOptions>() ?? new CrawlOptions();
 
-// Fetching other people's websites: redirect cap, per-attempt timeout, retries with backoff, circuit breaker.
+// Fetching other people's websites: per-attempt timeout, retries with backoff, total timeout; redirects handled in PageFetcher.
 builder.Services.AddHttpClient<PageFetcher>(c =>
     {
         c.DefaultRequestHeaders.UserAgent.ParseAdd("CrawlJobs/1.0 (+https://github.com/dpollak44/crawl-jobs)");
@@ -20,14 +21,7 @@ builder.Services.AddHttpClient<PageFetcher>(c =>
         AllowAutoRedirect = false, // PageFetcher follows redirects itself: same-host http/https hops allowed, final URL recorded, hops capped
         PooledConnectionLifetime = TimeSpan.FromMinutes(2),
     })
-    .AddStandardResilienceHandler(o =>
-    {
-        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(crawl.FetchTimeoutSeconds);
-        o.Retry.MaxRetryAttempts = crawl.FetchRetries;
-        o.Retry.Delay = TimeSpan.FromMilliseconds(500);
-        o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(crawl.FetchTimeoutSeconds * (crawl.FetchRetries + 1) + 5);
-        o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(Math.Max(crawl.FetchTimeoutSeconds * 2, 30));
-    });
+    .AddResilienceHandler("fetch", b => b.AddPipeline(FetchPipeline.Build(crawl))); // see FetchPipeline: retries + timeouts, no shared breaker
 
 builder.Services.AddScoped<PageProcessor>();
 builder.Services.AddHostedService<RabbitConsumer>();

@@ -28,6 +28,9 @@ public sealed class CrawlPage
     public decimal DomainLinkRatio { get; private set; }
     public string? Error { get; private set; }
     public DateTimeOffset DiscoveredAt { get; private set; }
+
+    /// <summary>When a message for this page was last put on the queue. The sweeper judges "stuck" by this, not by discovery time.</summary>
+    public DateTimeOffset LastQueuedAt { get; private set; }
     public DateTimeOffset? FetchedAt { get; private set; }
 
     private CrawlPage()
@@ -44,6 +47,7 @@ public sealed class CrawlPage
         ParentPageId = parentPageId,
         Status = PageStatus.Queued,
         DiscoveredAt = now,
+        LastQueuedAt = now,
     };
 
     public void MarkFetched(Uri finalUrl, int httpStatus, int outgoingLinks, int internalLinks, decimal ratio, DateTimeOffset now)

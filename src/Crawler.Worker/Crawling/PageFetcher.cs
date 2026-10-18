@@ -1,5 +1,6 @@
 using Crawler.Infrastructure;
 using Microsoft.Extensions.Options;
+using Polly.Timeout;
 
 namespace Crawler.Worker.Crawling;
 
@@ -40,9 +41,10 @@ public sealed class PageFetcher(HttpClient http, IOptions<CrawlOptions> options)
             {
                 return new FetchResult(FetchOutcome.Unreachable, current, (int?)ex.StatusCode, null, $"Could not reach the page: {ex.Message}");
             }
-            catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+            catch (Exception ex) when (ex is TimeoutRejectedException || (ex is TaskCanceledException && !ct.IsCancellationRequested))
             {
-                return new FetchResult(FetchOutcome.Unreachable, current, null, null, $"Timed out after {options.Value.FetchTimeoutSeconds} s per attempt (retries included).");
+                // The site did not answer in time, across every retry. That is the site's problem, not ours: record and move on.
+                return new FetchResult(FetchOutcome.Unreachable, current, null, null, $"Timed out after {options.Value.FetchTimeoutSeconds} s per attempt, {options.Value.FetchRetries} retries.");
             }
 
             using (response)

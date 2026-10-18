@@ -12,7 +12,8 @@ public sealed class RabbitPagePublisher(RabbitConnection connection) : IPagePubl
     public async Task PublishAsync(string exchange, CrawlPageMessage message, CancellationToken ct)
     {
         var conn = await connection.GetAsync(ct);
-        await using var channel = await conn.CreateChannelAsync(cancellationToken: ct);
+        // Publisher confirms: the await completes only when the broker has taken responsibility for the message.
+        await using var channel = await conn.CreateChannelAsync(new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true), ct);
         var body = JsonSerializer.SerializeToUtf8Bytes(message, Json);
         var props = new BasicProperties
         {
