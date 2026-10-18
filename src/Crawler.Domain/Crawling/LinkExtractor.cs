@@ -14,12 +14,15 @@ public static class LinkExtractor
     public static IReadOnlyList<Uri> Extract(string html, Uri pageUrl)
     {
         var document = Parser.ParseDocument(html);
-        var self = UrlNormalizer.TryNormalize(pageUrl.ToString(), pageUrl, out var normalizedSelf) ? normalizedSelf : pageUrl;
+
+        // Relative links resolve against the page's address AS FETCHED (trailing slash intact): "/products/" + "widget"
+        // is "/products/widget". The normalized form (slash stripped) is only for comparing identity.
+        var selfKey = UrlNormalizer.TryNormalize(pageUrl.ToString(), pageUrl, out var normalizedSelf) ? normalizedSelf.ToString() : pageUrl.ToString();
 
         // <base href> changes how relative links resolve; honour it like a browser would.
-        var baseUri = self;
+        var baseUri = pageUrl;
         var baseHref = document.QuerySelector("base[href]")?.GetAttribute("href");
-        if (baseHref is not null && Uri.TryCreate(self, baseHref, out var declaredBase))
+        if (baseHref is not null && Uri.TryCreate(pageUrl, baseHref, out var declaredBase))
         {
             baseUri = declaredBase;
         }
@@ -34,7 +37,7 @@ public static class LinkExtractor
             }
 
             var key = target.ToString();
-            if (key == self.ToString() || !seen.Add(key))
+            if (key == selfKey || !seen.Add(key))
             {
                 continue;
             }
