@@ -63,7 +63,7 @@ Local development without containers: `docker compose up db broker`, then `dotne
 | `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                               |
 | `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                               |
 | `src/web`                    | React + Vite + TypeScript. Three screens.                                                                                                                                                   |
-| `tests/*`                    | 78 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
+| `tests/*`                    | 83 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
 
 Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
 replaced, without starting anything.
@@ -273,9 +273,6 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
 
 - **Kafka**: RabbitMQ has native dead-lettering and TTL-based retry; the brief's requirements map onto it
   directly with no extra code.
-- **Worker-announced progress**: the live stream is driven by the API re-reading the database once a second
-  per open stream, not by the worker announcing changes. Right-sized for this scale; the announce-and-relay
-  version is in next steps.
 - **Following off-site links**: unbounded and discourteous. Counted, recorded as edges, never fetched.
 - **Subdomains as same-site**: the brief defines the domain as the host. Left as a switch, off by default.
 - **An outbox**: if the broker is down when a job is created, the job is marked `Failed` with the reason
@@ -294,9 +291,8 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
   after creation; the outbox removes the up-to-120-second delay and the `Failed` outcome at creation.
 - Scheduled reprocessing of the dead-letter queue with a cap, and an alert rule on the Error log line.
 - EF migrations as a release step; Testcontainers for Postgres and RabbitMQ in CI.
-- Worker-announced progress: the worker publishes "job X changed" to a fanout exchange and the API relays it
-  to open streams, replacing the one-second re-read with a notification plus a safety re-read. The web
-  container replaced by a CDN; the API behind a gateway.
+- The web container replaced by a CDN; the API behind a gateway; the progress stream behind the same gateway with
+  buffering off.
 - Politeness: robots.txt, a per-host delay, a shared rate limit across workers.
 - **Per-site body limit.** The 2 MB page limit is a safety rule for the unknown internet, and some legitimate
   sites exceed it (one tested home page is 13 MB of HTML and takes ~48 s to download; today it is recorded as

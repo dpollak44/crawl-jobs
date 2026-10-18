@@ -13,8 +13,12 @@ A job-based crawler as two .NET 8 services and a React UI, run with one `docker 
   model (page rows exist before their messages; unique keys on pages and edges; status check before any
   fetch); a message that exhausts its retries still leaves the page `Failed` and the job in a final state.
 - **Postgres** with three tables and indexes shaped by the queries the system actually runs.
-- **UI**: start, job details with polling, progress and tree, history; clear loading and error states.
-- **78 tests**: the rules in isolation, the API over real HTTP, and the worker's whole page step against
+- **UI**: start, job details with live progress over Server-Sent Events (polling as the fallback), tree on
+  completion, history; clear loading and error states.
+- **Live progress end to end**: the worker announces "job X changed" on a fanout exchange; each API instance
+  relays it to its open streams after one database read per job; a 10 s safety re-read covers a lost
+  announcement. The announcement carries no data: the database stays the only source of truth.
+- **83 tests**: the rules in isolation, the API over real HTTP, and the worker's whole page step against
   fixture HTML with a fake internet and an in-memory queue, including the same message delivered twice.
 - Structured logs with job and page ids, health endpoints for both services, CI that builds and tests.
 
@@ -35,7 +39,7 @@ A job-based crawler as two .NET 8 services and a React UI, run with one `docker 
 ## Trade-offs and what I prioritized
 
 I spent the time on correctness of the rules, the integrity of the message design, and a live run against
-real Postgres and RabbitMQ before building the UI. I cut Kafka, push updates, off-site crawling, subdomain
+real Postgres and RabbitMQ before building the UI. I cut Kafka, off-site crawling, subdomain
 scope, real-infrastructure tests, authentication and politeness controls, each for a stated reason in the
 README. A worker dying between committing a page and publishing its children is recovered by a sweeper that
 re-publishes pages left queued too long; the remaining gap, a broker outage at the moment a job is created,
