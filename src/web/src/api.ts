@@ -68,6 +68,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
             "Could not reach the server. Is the API running?",
         );
     }
+    if (response.status === 404) {
+        throw new ApiError(404, "No job with that id exists.");
+    }
     if (!response.ok) {
         throw new ApiError(response.status, await readProblem(response));
     }
