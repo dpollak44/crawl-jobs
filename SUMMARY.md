@@ -42,8 +42,8 @@ A job-based crawler as two .NET 8 services and a React UI, run with one `docker 
 ## Trade-offs and what I prioritized
 
 I spent the time on correctness of the rules, the integrity of the message design, and a live run against
-real Postgres and RabbitMQ before building the UI. I cut Kafka, off-site crawling, subdomain
-scope, real-infrastructure tests, authentication and politeness controls, each for a stated reason in the
-README. A worker dying between committing a page and publishing its children is recovered by a sweeper that
+real Postgres and RabbitMQ before building the UI. I chose RabbitMQ over Kafka, a separate container for the UI, and EF Core, each for a stated reason;
+I cut the outbox, tests against real Postgres and RabbitMQ, and authentication, rate limiting and robots.txt,
+each with its reason and its place in next steps in the README. A worker dying between committing a page and publishing its children is recovered by a sweeper that
 re-publishes pages left queued too long; the remaining gap, a broker outage at the moment a job is created,
 is documented with its fix, an outbox, as the first thing I would build next.

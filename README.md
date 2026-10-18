@@ -290,31 +290,37 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
    and would have cost far more discovered through the UI.
 4. **The UI last**, against a working back end, so it was built against real responses.
 
+## Key decisions
+
+- **RabbitMQ over Kafka.** Both were offered. RabbitMQ has native dead-lettering and TTL-based retry, so the
+  brief's requirements map onto it directly with no extra code; Kafka would have meant building both.
+- **The UI served from its own container, not by the API.** Static files belong at the edge, close to the
+  user; the API stays close to the data. Two addresses cost one CORS line, and the web container is what a
+  CDN replaces in production.
+- **EF Core as the ORM.** The team default: the schema lives in code beside the model, and the two places that
+  needed exact SQL semantics, the atomic page-cap reservation and the unique-index collision handling, got
+  them through EF anyway. Dapper would be the choice for a heavy reporting side later.
+
 ## What I cut, and why
 
-- **Kafka**: RabbitMQ has native dead-lettering and TTL-based retry; the brief's requirements map onto it
-  directly with no extra code.
-- **Following off-site links**: unbounded and discourteous. Counted, recorded as edges, never fetched.
-- **Subdomains as same-site**: the brief defines the domain as the host. Left as a switch, off by default.
 - **An outbox**: if the broker is down when a job is created, the job is marked `Failed` with the reason
   rather than left `Pending` forever. The sweeper covers a lost message after creation; the full outbox
   pattern, which also covers creation, is next.
 - **Tests against real Postgres and RabbitMQ**: replaced by a fixture test with the two outside dependencies
   faked, plus the compose run as the real-world proof. Testcontainers would be the next step.
 - **Authentication, rate limiting, robots.txt**: nothing in the brief needs them; each is a line in next steps.
-- **Serving the UI from the API**: deliberately not. Static files belong at the edge; the API stays close to
-  the data. Two addresses cost one CORS line.
 
 ## What I would do next
 
-- **Outbox.** Write the message into the database in the same transaction as the job or page row and relay
-  it, so even a broker outage at job creation cannot lose a job. The sweeper already recovers a lost message
-  after creation; the outbox removes the up-to-120-second delay and the `Failed` outcome at creation.
-- Scheduled reprocessing of the dead-letter queue with a cap, and an alert rule on the Error log line.
-- EF migrations as a release step; Testcontainers for Postgres and RabbitMQ in CI.
-- The web container replaced by a CDN; the API behind a gateway; the progress stream behind the same gateway with
-  buffering off.
-- Politeness: robots.txt, a per-host delay, a shared rate limit across workers.
+**Product**
+
+- Scheduled and recurring crawls, so a site is re-checked without someone pressing the button.
+- Notify on completion: a webhook first (integrations want it), email second.
+- Report *why* a site blocked us (403, a robots refusal, a rate limit) as a reason category on the page,
+  instead of a bare failure; it changes what an operator does next.
+- Authentication on the API and the UI: today anyone who can reach the API can start crawls.
+- Crawl analytics and benchmarking: pages per second, failure rate and the ratio distribution per job,
+  tracked over time, so a regression in a site or in the crawler is visible.
 - **Per-site body limit.** The 2 MB page limit is a safety rule for the unknown internet, and some legitimate
   sites exceed it (one tested home page is 13 MB of HTML and takes ~48 s to download; today it is recorded as
   skipped with that reason and the crawl stops beneath it). Next: an optional per-site override, granted when
@@ -327,6 +333,25 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
   other pages crawled cleanly) and recommends, inside fixed guard rails: a hard ceiling it cannot raise, a
   logged reason for every recommendation, and a human review only for the cases it cannot decide with
   confidence. The aim is that most of these decisions need no person at all.
+
+**Operations**
+
+- **Outbox.** Write the message into the database in the same transaction as the job or page row and relay
+  it, so even a broker outage at job creation cannot lose a job. The sweeper already recovers a lost message
+  after creation; the outbox removes the up-to-five-minute delay and the `Failed` outcome at creation.
+- Scale out: run more workers and raise per-worker concurrency; the atomic cap reservation and the unique
+  indexes already make that safe, and three workers did 120 pages in 12 s.
+- Operational alerts with concrete triggers: the dead-letter queue not empty, a job `Running` past its
+  expected time, the Error log line.
+- Scheduled reprocessing of the dead-letter queue with a cap.
+- Politeness: robots.txt, a per-host delay, a shared rate limit across workers; then proxy rotation for sites
+  that block a single address, after politeness, not before.
+
+**Deployment**
+
+- The web container replaced by a CDN; the API behind a gateway, with the progress stream behind the same
+  gateway and buffering off. The API on App Service or Container Apps, the workers as a scaled container,
+  Postgres managed; EF migrations as a release step; Testcontainers for Postgres and RabbitMQ in CI.
 
 ## Assumptions and known limitations
 
