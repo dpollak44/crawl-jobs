@@ -44,12 +44,12 @@ public sealed class CreateJobRequestValidator : AbstractValidator<CreateJobReque
             .NotEmpty().WithMessage("Enter the address of the page to start from.")
             .MaximumLength(Crawler.Domain.Crawling.UrlNormalizer.MaxLength).WithMessage("That address is too long to crawl (limit 2,048 characters).");
         RuleFor(x => x.UrlWithScheme)
-            .Must(u => Uri.TryCreate(u, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" && uri.Host.Contains('.'))
+            .Must(u => Uri.TryCreate(u, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" && LooksLikeHost(uri))
             .When(x => !string.IsNullOrWhiteSpace(x.Url))
             .WithName("Url")
             .WithMessage("That does not look like a website address. Try something like example.com or https://example.com/page.");
         RuleFor(x => x.UrlWithScheme)
-            .Must(u => !Uri.TryCreate(u, UriKind.Absolute, out var uri) || Crawler.Domain.Crawling.AddressGuard.IsPublicWebAddress(uri))
+            .Must(u => !Uri.TryCreate(u, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || !LooksLikeHost(uri) || Crawler.Domain.Crawling.AddressGuard.IsPublicWebAddress(uri)) // only when the shape rule above passed
             .When(x => !string.IsNullOrWhiteSpace(x.Url))
             .WithName("Url")
             .WithMessage("Only public websites can be crawled; private or internal addresses are refused.");
@@ -58,6 +58,9 @@ public sealed class CreateJobRequestValidator : AbstractValidator<CreateJobReque
         RuleFor(x => x.MaxPages).InclusiveBetween(1, maxPagesLimit).When(x => x.MaxPages.HasValue)
             .WithMessage($"Page limit must be between 1 and {maxPagesLimit}.");
     }
+
+    /// <summary>A dotted name or an IP literal. Bare words ("localhost", "intranet") are not website addresses.</summary>
+    private static bool LooksLikeHost(Uri uri) => uri.Host.Contains('.') || System.Net.IPAddress.TryParse(uri.Host.Trim('[', ']'), out _);
 }
 
 public static class StatusText
