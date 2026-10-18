@@ -6,6 +6,17 @@ export function formatDateTime(iso: string | null): string {
     });
 }
 
+/** Compact form for table cells: "Oct 18, 5:07 PM". */
+export function formatShort(iso: string | null): string {
+    if (!iso) return "—";
+    return new Date(iso).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+    });
+}
+
 export function hostOf(url: string): string {
     try {
         return new URL(url).host;

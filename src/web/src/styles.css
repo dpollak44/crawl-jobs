@@ -82,7 +82,7 @@ button:disabled { opacity: 0.55; cursor: default; }
 .history .site { font-weight: 600; }
 .history .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .history td .small { display: block; max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.history td.small { white-space: normal; min-width: 7rem; }
+.history td.small { white-space: nowrap; }
 .pager { display: flex; align-items: center; justify-content: center; gap: 0.75rem; margin-top: 0.75rem; }
 
 /* Badges */

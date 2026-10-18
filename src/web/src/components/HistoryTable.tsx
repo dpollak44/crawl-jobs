@@ -1,6 +1,6 @@
 import type { JobSummary, Page } from "../api/types";
 import { StatusBadge } from "./StatusBadge";
-import { formatDateTime, hostOf } from "../lib/format";
+import { formatShort, hostOf } from "../lib/format";
 
 interface Props {
     data: Page<JobSummary> | null;
@@ -94,7 +94,7 @@ export function HistoryTable({
                                         </span>
                                     </td>
                                     <td className="muted small">
-                                        {formatDateTime(j.createdAt)}
+                                        {formatShort(j.createdAt)}
                                     </td>
                                 </tr>
                             );
