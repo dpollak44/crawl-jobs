@@ -31,7 +31,7 @@ public static class FetchPipeline
                 BackoffType = DelayBackoffType.Exponential,
                 UseJitter = true,
                 ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
-                    .Handle<HttpRequestException>()
+                    .Handle<HttpRequestException>(e => e.InnerException is not Crawler.Domain.Crawling.AddressRefusedException) // a refused address is final, never retried
                     .Handle<TimeoutRejectedException>()
                     .HandleResult(r => r.StatusCode is >= HttpStatusCode.InternalServerError or HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests),
             });

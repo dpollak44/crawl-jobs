@@ -49,7 +49,16 @@ public class JobStreamTests : IClassFixture<ApiFactory>
             job.MarkRunning(DateTimeOffset.UtcNow);
             await db.SaveChangesAsync(cts.Token);
             (await relay.NotifyAsync(jobId, cts.Token)).ShouldBeTrue("the open stream should be subscribed");
-            await Task.Delay(300, cts.Token);
+            // Observe the Running line before completing: the relay keeps only the latest summary per stream, so
+            // the contract is "each change that the reader has not yet consumed", not "every change ever".
+            string? runningLine;
+            do
+            {
+                runningLine = await reader.ReadLineAsync(cts.Token);
+                runningLine.ShouldNotBeNull("the stream ended before reporting Running");
+            }
+            while (!runningLine.Contains("\"status\":\"Running\"", StringComparison.Ordinal));
+            lines.Add(runningLine);
             seed.MarkFetched(new Uri("https://stream.example.com/"), 200, 0, 0, 0m, DateTimeOffset.UtcNow);
             job.MarkCompleted(DateTimeOffset.UtcNow);
             await db.SaveChangesAsync(cts.Token);

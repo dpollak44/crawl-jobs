@@ -47,6 +47,12 @@ public sealed class PageFetcher(HttpClient http, IOptions<CrawlOptions> options)
                 request.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1");
                 response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
             }
+            catch (HttpRequestException ex) when (ex.InnerException is AddressRefusedException refused)
+            {
+                return refused.Reason == AddressRefusal.Private
+                    ? new FetchResult(FetchOutcome.OutOfScope, current, null, null, refused.Message)
+                    : new FetchResult(FetchOutcome.Unreachable, current, null, null, refused.Message);
+            }
             catch (HttpRequestException ex)
             {
                 return new FetchResult(FetchOutcome.Unreachable, current, (int?)ex.StatusCode, null, $"Could not reach the page: {ex.Message}");

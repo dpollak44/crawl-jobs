@@ -45,9 +45,10 @@ public class AddressGuardTests
     {
         Task<IPAddress[]> Resolve(string h, CancellationToken _) => Task.FromResult(new[] { IPAddress.Parse("10.1.2.3"), IPAddress.Parse("192.168.0.9") });
 
-        var allowed = await AddressGuard.ResolveAllowedAsync("looks-public.example.com", Resolve, CancellationToken.None);
+        var refused = await Should.ThrowAsync<AddressRefusedException>(() => AddressGuard.ResolveAllowedAsync("looks-public.example.com", Resolve, CancellationToken.None));
 
-        allowed.ShouldBeEmpty();
+        refused.Reason.ShouldBe(AddressRefusal.Private);
+        refused.Message.ShouldContain("private or internal");
     }
 
     [Fact]
@@ -61,11 +62,14 @@ public class AddressGuardTests
     }
 
     [Fact]
-    public async Task At_connection_time_a_name_that_does_not_resolve_is_refused_not_thrown()
+    public async Task At_connection_time_a_name_that_does_not_resolve_gets_its_own_plain_message()
     {
         Task<IPAddress[]> Resolve(string h, CancellationToken _) => throw new SocketException((int)SocketError.HostNotFound);
 
-        (await AddressGuard.ResolveAllowedAsync("nope.example.com", Resolve, CancellationToken.None)).ShouldBeEmpty();
+        var refused = await Should.ThrowAsync<AddressRefusedException>(() => AddressGuard.ResolveAllowedAsync("nope.example.com", Resolve, CancellationToken.None));
+
+        refused.Reason.ShouldBe(AddressRefusal.NotFound);
+        refused.Message.ShouldBe("The address nope.example.com could not be found."); // never confused with a private-address refusal
     }
 
     [Fact]
@@ -74,7 +78,7 @@ public class AddressGuardTests
         var calls = 0;
         Task<IPAddress[]> Resolve(string h, CancellationToken _) { calls++; return Task.FromResult(Array.Empty<IPAddress>()); }
 
-        (await AddressGuard.ResolveAllowedAsync("169.254.169.254", Resolve, CancellationToken.None)).ShouldBeEmpty();
+        (await Should.ThrowAsync<AddressRefusedException>(() => AddressGuard.ResolveAllowedAsync("169.254.169.254", Resolve, CancellationToken.None))).Reason.ShouldBe(AddressRefusal.Private);
         (await AddressGuard.ResolveAllowedAsync("8.8.8.8", Resolve, CancellationToken.None)).Count.ShouldBe(1);
         calls.ShouldBe(0);
     }

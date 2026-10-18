@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
 
 namespace Crawler.Infrastructure.Messaging;
 
@@ -22,6 +23,18 @@ public sealed class RabbitPagePublisher(RabbitConnection connection) : IPagePubl
             MessageId = $"{message.PageId}:{message.Attempt}",
             CorrelationId = message.JobId.ToString(),
         };
-        await channel.BasicPublishAsync(exchange, RabbitTopology.RoutingKey, mandatory: false, basicProperties: props, body: body, cancellationToken: ct);
+        // mandatory + a return handler: a message the broker cannot route (a missing binding) comes BACK instead of
+        // vanishing, and the caller learns about it. With confirms on, the return arrives before the confirm.
+        BasicReturnEventArgs? returned = null;
+        channel.BasicReturnAsync += (_, ea) =>
+        {
+            returned = ea;
+            return Task.CompletedTask;
+        };
+        await channel.BasicPublishAsync(exchange, RabbitTopology.RoutingKey, mandatory: true, basicProperties: props, body: body, cancellationToken: ct);
+        if (returned is { } r)
+        {
+            throw new UnroutableMessageException(exchange, RabbitTopology.RoutingKey, r.ReplyCode, r.ReplyText);
+        }
     }
 }

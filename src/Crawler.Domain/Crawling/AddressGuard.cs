@@ -57,8 +57,9 @@ public static class AddressGuard
     }
 
     /// <summary>
-    /// Resolve a host and return only its public addresses, or an empty list when every address is private
-    /// (or the name does not resolve). The HTTP connect step uses this so the address actually dialled is vetted.
+    /// Resolve a host and return only its public addresses. Throws <see cref="AddressRefusedException"/> when the
+    /// name does not resolve (NotFound) or when every address it resolves to is private (Private), so the two
+    /// cases are never confused. The HTTP connect step uses this so the address actually dialled is vetted.
     /// </summary>
     public static async Task<IReadOnlyList<IPAddress>> ResolveAllowedAsync(string host, Func<string, CancellationToken, Task<IPAddress[]>> resolve, CancellationToken ct)
     {
@@ -76,10 +77,21 @@ public static class AddressGuard
             }
             catch (System.Net.Sockets.SocketException)
             {
-                return [];
+                throw new AddressRefusedException(normalized, AddressRefusal.NotFound);
+            }
+
+            if (addresses.Length == 0)
+            {
+                throw new AddressRefusedException(normalized, AddressRefusal.NotFound);
             }
         }
 
-        return addresses.Where(a => !IsPrivate(a)).ToList();
+        var allowed = addresses.Where(a => !IsPrivate(a)).ToList();
+        if (allowed.Count == 0)
+        {
+            throw new AddressRefusedException(normalized, AddressRefusal.Private);
+        }
+
+        return allowed;
     }
 }

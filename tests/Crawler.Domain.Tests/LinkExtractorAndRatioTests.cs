@@ -42,7 +42,7 @@ public class LinkExtractorAndRatioTests
     {
         var links = LinkExtractor.Extract(Fixture("products.html"), Page);
 
-        var counts = DomainLinkRatio.Count(links, new SiteScope("www.example.com", includeSubdomains: true));
+        var counts = DomainLinkRatio.Count(links, new SiteScope("example.com", includeSubdomains: true)); // www. and docs. are both subdomains of example.com
 
         counts.Internal.ShouldBe(5);
         counts.Ratio.ShouldBe(0.8333m);

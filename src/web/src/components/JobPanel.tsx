@@ -92,10 +92,12 @@ export function JobPanel({ jobId, onChanged }: Props) {
                     <dt>Started</dt>
                     <dd>{formatDateTime(job.startedAt ?? job.createdAt)}</dd>
                 </div>
-                <div>
-                    <dt>{job.completedAt ? "Finished" : "Running for"}</dt>
-                    <dd>{took ?? (job.startedAt ? "…" : "—")}</dd>
-                </div>
+                {took && (
+                    <div>
+                        <dt>Finished in</dt>
+                        <dd>{took}</dd>
+                    </div>
+                )}
             </dl>
 
             <div className="progress-block">

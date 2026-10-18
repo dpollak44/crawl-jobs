@@ -4,6 +4,9 @@ using Crawler.Worker.Messaging;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
 
+// Pages that declare windows-1252 and friends: .NET on Linux knows only Unicode encodings unless the code pages are registered.
+WorkerEncodings.EnsureRegistered();
+
 // The worker is a web host too, for one reason: a /health endpoint the orchestrator can probe.
 var builder = WebApplication.CreateBuilder(args);
 builder.AddCrawlerDefaults();

@@ -4,6 +4,8 @@ namespace Crawler.Api.Tests;
 
 public class ProgressRelayTests
 {
+    private static CancellationToken Deadline => new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token; // a regression fails, never hangs
+
     private static JobSummary Summary(Guid id, string status) =>
         new(id, "https://x.test/", status, 2, 200, DateTimeOffset.UtcNow, null, null, null, new JobProgress(1, 0, 0, 0, 1));
 
@@ -19,8 +21,8 @@ public class ProgressRelayTests
         (await relay.NotifyAsync(jobId, CancellationToken.None)).ShouldBeTrue();
 
         loads.ShouldBe(1); // one database read per notification, however many streams are open
-        (await updates.ReadAsync()).Status.ShouldBe("Running");
-        (await updates2.ReadAsync()).Status.ShouldBe("Running");
+        (await updates.ReadAsync(Deadline)).Status.ShouldBe("Running");
+        (await updates2.ReadAsync(Deadline)).Status.ShouldBe("Running");
         subscription.Dispose();
         subscription2.Dispose();
         relay.SubscriberCount(jobId).ShouldBe(0);
@@ -49,7 +51,7 @@ public class ProgressRelayTests
         await relay.NotifyAsync(jobId, CancellationToken.None);
         await relay.NotifyAsync(jobId, CancellationToken.None);
 
-        (await updates.ReadAsync()).Status.ShouldBe("v3");
+        (await updates.ReadAsync(Deadline)).Status.ShouldBe("v3");
         updates.TryRead(out _).ShouldBeFalse();
     }
 }

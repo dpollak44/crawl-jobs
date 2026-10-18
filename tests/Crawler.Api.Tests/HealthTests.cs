@@ -2,24 +2,34 @@ using System.Net;
 
 namespace Crawler.Api.Tests;
 
-public class HealthTests : IClassFixture<ApiFactory>
+/// <summary>
+/// The health endpoint with its dependency checks replaced by stand-ins with a known answer, so the test proves
+/// the mapping (all healthy → 200 "Healthy"; one dependency down → 503 "Unhealthy") and never depends on a
+/// developer's local broker. Real connectivity is proven by the compose health checks gating start-up.
+/// </summary>
+public class HealthTests
 {
-    private readonly HttpClient _client;
-
-    public HealthTests(ApiFactory factory)
+    [Fact]
+    public async Task All_dependencies_healthy_is_200_Healthy()
     {
-        _client = factory.CreateClient();
+        using var factory = new ApiFactory { DependenciesHealthy = true };
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/health");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await response.Content.ReadAsStringAsync()).ShouldBe("Healthy");
     }
 
-    /// <summary>
-    /// Proves ROUTING ONLY: the health endpoint is mapped and answers. The test host has no broker, so the overall
-    /// verdict is Unhealthy here; the real proof that the checks work is the compose health checks gating start-up.
-    /// </summary>
     [Fact]
-    public async Task Health_endpoint_is_routed_and_answers_this_proves_wiring_only()
+    public async Task A_dependency_down_is_503_Unhealthy()
     {
-        var response = await _client.GetAsync("/health");
+        using var factory = new ApiFactory { DependenciesHealthy = false };
+        using var client = factory.CreateClient();
 
-        ((int)response.StatusCode).ShouldBeOneOf(200, 503);
+        var response = await client.GetAsync("/health");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+        (await response.Content.ReadAsStringAsync()).ShouldBe("Unhealthy");
     }
 }

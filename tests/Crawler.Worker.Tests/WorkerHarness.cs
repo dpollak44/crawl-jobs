@@ -36,21 +36,34 @@ public sealed class RecordingAnnouncer : IProgressAnnouncer
     }
 }
 
+/// <summary>A clock the test moves by hand, so creation and processing stamps come from one source.</summary>
+public sealed class ManualClock(DateTimeOffset start) : TimeProvider
+{
+    private DateTimeOffset _now = start;
+
+    public override DateTimeOffset GetUtcNow() => _now;
+
+    public void Advance(TimeSpan by) => _now = _now.Add(by);
+}
+
 /// <summary>
 /// Everything the worker needs, with the two outside dependencies replaced: a SQLite in-memory database
 /// instead of Postgres, and <see cref="FakeSite"/> instead of the internet. A fresh DbContext per message,
-/// exactly as the real consumer scopes it.
+/// exactly as the real consumer scopes it. One clock for creation and processing; every HttpClient the harness
+/// hands out is owned and disposed here; the fake site is shared and kept alive.
 /// </summary>
 public sealed class WorkerHarness : IDisposable
 {
     private readonly SqliteConnection _connection = new("Data Source=:memory:");
     private readonly DbContextOptions<AppDbContext> _dbOptions;
+    private readonly List<HttpClient> _clients = [];
 
     public FakeSite Site { get; } = new();
     public InMemoryQueue Queue { get; } = new();
     public RecordingAnnouncer Announcer { get; } = new();
     public CrawlOptions Options { get; } = new() { MaxBodyBytes = 1024 * 1024 };
-    public DateTimeOffset Now { get; } = new(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+    public ManualClock Clock { get; } = new(new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero));
+    public DateTimeOffset Now => Clock.GetUtcNow();
 
     public WorkerHarness()
     {
@@ -80,8 +93,9 @@ public sealed class WorkerHarness : IDisposable
     public PageProcessor Processor(AppDbContext db)
     {
         var http = new HttpClient(new ResilienceHandler(FetchPipeline.Build(Options)) { InnerHandler = Site }, disposeHandler: false);
+        _clients.Add(http);
         var fetcher = new PageFetcher(http, Microsoft.Extensions.Options.Options.Create(Options));
-        return new PageProcessor(db, fetcher, Queue, Announcer, Microsoft.Extensions.Options.Options.Create(Options), TimeProvider.System, NullLogger<PageProcessor>.Instance);
+        return new PageProcessor(db, fetcher, Queue, Announcer, Microsoft.Extensions.Options.Options.Create(Options), Clock, NullLogger<PageProcessor>.Instance);
     }
 
     public async Task<ProcessResult> ProcessAsync(CrawlPageMessage message)
@@ -90,14 +104,15 @@ public sealed class WorkerHarness : IDisposable
         return await Processor(db).ProcessAsync(message, CancellationToken.None);
     }
 
-    /// <summary>Act as a single worker: process messages until the queue is empty.</summary>
-    public async Task<int> DrainAsync()
+    /// <summary>Act as a single worker: process messages until the queue is empty. The ceiling turns a delivery regression into a failure instead of a hang.</summary>
+    public async Task<int> DrainAsync(int ceiling = 500)
     {
         var processed = 0;
         while (Queue.Pending.TryDequeue(out var message))
         {
             (await ProcessAsync(message)).Outcome.ShouldBe(ProcessOutcome.Done);
             processed++;
+            processed.ShouldBeLessThanOrEqualTo(ceiling, "the queue never drained");
         }
 
         return processed;
@@ -105,6 +120,11 @@ public sealed class WorkerHarness : IDisposable
 
     public void Dispose()
     {
+        foreach (var client in _clients)
+        {
+            client.Dispose();
+        }
+
         _connection.Dispose();
         Site.Dispose();
     }

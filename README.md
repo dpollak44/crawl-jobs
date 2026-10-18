@@ -63,7 +63,7 @@ Local development without containers: `docker compose up db broker`, then `dotne
 | `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                                                                                                                                                                                                 |
 | `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                                                                                                                                                                                                 |
 | `src/web` | React + Vite + TypeScript. Two pages: the crawl list with a New crawl form in place, and a job page (status, timings, live progress, the tree) that opens from a row. Structure: `api/` (client + types), `hooks/` (`useJob` live stream with polling fallback and auto-reopen, `useHistory`, `useTree`), `components/`, `pages/`, `lib/format`. Plain CSS with design tokens, no UI framework. |
-| `tests/*`                    | 147 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                                                                                                                                                                                            |
+| `tests/*`                    | 161 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                                                                                                                                                                                            |
 
 Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
 replaced, without starting anything.
@@ -118,11 +118,11 @@ mode without a reload. A production gateway must not buffer this endpoint (the r
   each), and the query string as written. Links over 2,048 characters are ignored: they cannot be stored and
   are never a page worth crawling. Two spellings of one page produce one key, and that key is the
   uniqueness rule in the database.
-- **Same site** (`SiteScope`): same host, ignoring a leading `www.` and ignoring the scheme. Subdomains are
-  outside by default (the brief defines the domain as the host); `Crawl:IncludeSubdomains` flips that.
-  A same-site link spelled with the other scheme or with/without `www.` is rewritten to the job's own scheme
-  and host before it becomes a page, so one page is one row however it was linked. The edge keeps the link
-  as written.
+- **Same site** (`SiteScope`): the exact host of the starting address, as the brief defines it; `www.example.com`
+  and `example.com` are two hosts, so a link between them is an outside link. Scheme is ignored (http and https
+  on one host are one site); case and a trailing dot are ignored. Subdomains are outside by default;
+  `Crawl:IncludeSubdomains` flips that. A same-site link spelled with the other scheme is rewritten to the job's
+  own scheme before it becomes a page, so one page is one row; the edge keeps the link as written.
 - **Depth**: the starting page is depth 0; default max depth 2 fetches three levels.
 - **Links counted** for the ratio: every `<a href>`, normalized, de-duplicated; `mailto:` / `tel:` /
   `javascript:` ignored; links to the page itself ignored. Every outgoing link is stored as an edge,
@@ -139,8 +139,10 @@ mode without a reload. A production gateway must not buffer this endpoint (the r
   private ranges, carrier-grade NAT, literal IPs in those ranges, `localhost`, `.local` and `.internal` are
   refused (`AddressGuard`). And at connection time: the worker's HTTP handler resolves each host itself and
   dials only public addresses (`GuardedConnect`), so a public-looking name that resolves to an internal address,
-  or is rebound to one mid-crawl, is refused.
-- **Character set**: from the response header, else the page's own `<meta charset>`, else UTF-8.
+  or is rebound to one mid-crawl, is refused. A refusal is final: it is never retried, and a name that simply
+  does not resolve is reported as "could not be found", never as a private-address refusal.
+- **Character set**: from the response header, else the page's own `<meta charset>`, else UTF-8. The worker
+  registers the legacy code pages (windows-1252, iso-8859-x) at start-up so a page declaring one decodes correctly.
 - **Domain Link Ratio** = same-site links / all links; 0 when a page has no links.
 
 ## Event-driven design
@@ -160,7 +162,10 @@ One message type, `CrawlPageMessage`, JSON on RabbitMQ, persistent:
 ```
 
 Properties: `messageId` = `pageId:attempt`, `correlationId` = `jobId`, `contentType` = `application/json`.
-Publishing uses broker confirms: "published" means the broker has taken responsibility for the message.
+Publishing uses broker confirms and the `mandatory` flag: "published" means the broker has taken responsibility
+for the message **and** had a queue to put it in. A message nothing is bound to receive comes back to the
+publisher and raises an error (`UnroutableMessageException`) instead of vanishing; at job creation that
+failure marks the job `Failed` with the reason.
 It carries ids, not state. One message per page, not per job: several workers can share a job, progress is
 real, and the idempotency requirement means something.
 
@@ -355,7 +360,8 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
 
 ## Assumptions and known limitations
 
-- The "starting domain" is the host of the URL you typed, with `www.` ignored; `blog.example.com` is outside.
+- The "starting domain" is the exact host of the URL you typed: `www.example.com` and `example.com` are different
+  sites, and so is `blog.example.com`. Start from the spelling the site actually uses (most redirect to one).
 - http and https on the same host are the same site. Query-string order and path capitalisation are kept as
   written, so `?a=1&b=2` and `?b=2&a=1` are two pages.
 - Non-HTML links are requested to learn their type (headers only; the body is never read). A HEAD request

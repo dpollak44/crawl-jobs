@@ -15,11 +15,9 @@ public static class GuardedConnect
     public static async ValueTask<System.IO.Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken ct)
     {
         var host = context.DnsEndPoint.Host;
+        // Throws AddressRefusedException (NotFound or Private); SocketsHttpHandler wraps it in an HttpRequestException,
+        // which the fetcher unwraps and the retry policy leaves alone.
         var allowed = await AddressGuard.ResolveAllowedAsync(host, (h, token) => Dns.GetHostAddressesAsync(h, token), ct);
-        if (allowed.Count == 0)
-        {
-            throw new HttpRequestException($"Refusing to connect to {host}: it resolves only to private or internal addresses.");
-        }
 
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
         try

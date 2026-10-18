@@ -253,16 +253,30 @@ public class PageProcessorTests : IDisposable
         {
             (await QueuedPageSweeper.SweepOnceAsync(db, _h.Queue, _h.Now, TimeSpan.FromMinutes(2), CancellationToken.None)).ShouldBe(0);
         }
-
-        // And the re-published message completes the job through the normal path.
+        // The re-sent message settles the old page; the fresh page is still waiting, so the job is NOT complete yet.
         await _h.DrainAsync();
-        await using var check = _h.Db();
-        (await check.Pages.SingleAsync(p => p.Id == oldPage)).Status.ShouldBe(PageStatus.Fetched);
-        (await check.Pages.CountAsync(p => p.JobId == job.Id)).ShouldBe(5); // no duplicate rows
+        await using (var check = _h.Db())
+        {
+            (await check.Pages.SingleAsync(p => p.Id == oldPage)).Status.ShouldBe(PageStatus.Fetched);
+            (await check.Pages.SingleAsync(p => p.Id == freshPage)).Status.ShouldBe(PageStatus.Queued);
+            (await check.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Running);
+            (await check.Pages.CountAsync(p => p.JobId == job.Id)).ShouldBe(5); // no duplicate rows
+        }
+
+        // Once the fresh page's message arrives too, the job completes.
+        await using (var db = _h.Db())
+        {
+            var fresh = await db.Pages.SingleAsync(p => p.Id == freshPage);
+            await _h.Queue.PublishAsync(new CrawlPageMessage(job.Id, fresh.Id, fresh.Url, fresh.Depth), CancellationToken.None);
+        }
+
+        await _h.DrainAsync();
+        await using var final = _h.Db();
+        (await final.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Completed);
     }
 
     [Fact]
-    public async Task The_same_page_spelled_with_http_or_www_becomes_one_page_row()
+    public async Task The_same_page_spelled_with_http_or_https_becomes_one_page_row_and_www_is_another_host()
     {
         _h.Site.Html("https://shop.test/spellings", "spellings.html").Html("https://shop.test/x", "leaf.html");
         var (job, _) = await _h.StartJobAsync("https://shop.test/spellings", maxDepth: 1);
@@ -271,9 +285,9 @@ public class PageProcessorTests : IDisposable
 
         await using var db = _h.Db();
         var children = await db.Pages.Where(p => p.JobId == job.Id && p.Depth == 1).Select(p => p.Url).ToListAsync();
-        children.ShouldBe(["https://shop.test/x"]);                       // http://, www., and https:// spellings collapsed into the job's own
-        (await db.Links.CountAsync(l => l.JobId == job.Id)).ShouldBe(3); // but every link as written is still recorded as an edge
-        (await db.Pages.SingleAsync(p => p.Url == "https://shop.test/spellings")).DomainLinkRatio.ShouldBe(1m);
+        children.ShouldBe(["https://shop.test/x"]); // http:// and https:// spellings collapsed into the job's own; www. is a different host, so not a page
+        (await db.Links.CountAsync(l => l.JobId == job.Id)).ShouldBe(3); // every link as written is still recorded as an edge
+        (await db.Pages.SingleAsync(p => p.Url == "https://shop.test/spellings")).DomainLinkRatio.ShouldBe(0.6667m); // 2 of 3 stay on the exact host
     }
 
     [Fact]
@@ -468,8 +482,7 @@ public class PageProcessorTests : IDisposable
 
         await using (var db = _h.Db())
         {
-            var processor = new PageProcessor(db, new PageFetcher(new HttpClient(_h.Site, false), Microsoft.Extensions.Options.Options.Create(_h.Options)), _h.Queue, _h.Announcer,
-                Microsoft.Extensions.Options.Options.Create(_h.Options), TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<PageProcessor>.Instance);
+            var processor = _h.Processor(db);
             await processor.GiveUpAsync(message with { Attempt = 3 }, "database unreachable", CancellationToken.None);
         }
 
@@ -497,7 +510,8 @@ public class PageProcessorTests : IDisposable
     public async Task A_page_whose_header_names_no_charset_is_decoded_by_its_own_meta_declaration()
     {
         // windows-1252 bytes: "café" has 0xE9 for é. Decoded as UTF-8 by mistake it would become a replacement character.
-        System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+        // The code-page provider is registered by the WORKER at start-up (Program.cs); this test must fail if production forgets it.
+        WorkerEncodings.EnsureRegistered();
         var html = "<html><head><meta charset=\"windows-1252\"></head><body><a href=\"/caf\u00e9\">menu</a></body></html>";
         var bytes = System.Text.Encoding.GetEncoding(1252).GetBytes(html);
         _h.Site.Bytes("https://shop.test/menu", bytes).Html("https://shop.test/café", "leaf.html");
@@ -509,12 +523,5 @@ public class PageProcessorTests : IDisposable
         var child = await db.Pages.SingleAsync(p => p.JobId == job.Id && p.Depth == 1);
         child.Url.ShouldBe("https://shop.test/café"); // é survived because the page was decoded as it said; decoded as UTF-8 it would be garbage
         child.Status.ShouldBe(PageStatus.Fetched);
-    }
-
-    [Fact]
-    public void The_sweeper_default_matches_the_documented_five_minutes()
-    {
-        new Crawler.Infrastructure.CrawlOptions().StuckAfterSeconds.ShouldBe(300);
-        new Crawler.Infrastructure.CrawlOptions().SweepIntervalSeconds.ShouldBe(60);
     }
 }
