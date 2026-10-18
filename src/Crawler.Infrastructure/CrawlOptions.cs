@@ -19,5 +19,5 @@ public sealed class CrawlOptions
     public int SweepIntervalSeconds { get; set; } = 60;
 
     /// <summary>A Queued page older than this on a running job is assumed to have lost its message and is re-published.</summary>
-    public int StuckAfterSeconds { get; set; } = 120;
+    public int StuckAfterSeconds { get; set; } = 300;
 }

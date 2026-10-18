@@ -67,64 +67,86 @@ public sealed class PageProcessor(
             return new ProcessResult(ProcessOutcome.Done);
         }
 
-        job.MarkRunning(now);
+        if (job.Status == JobStatus.Pending)
+        {
+            job.MarkRunning(now);
+            await db.SaveChangesAsync(ct); // the screen says Running while the first page downloads, not after
+        }
 
-        var fetch = await fetcher.FetchAsync(new Uri(page.Url), ct);
         var scope = new SiteScope(job.StartHost, options.Value.IncludeSubdomains);
         var seed = new Uri(job.InputUrl);
+        var fetch = await fetcher.FetchAsync(new Uri(page.Url), target => scope.Contains(target), ct);
         var children = new List<CrawlPage>();
+        IReadOnlyList<Uri> links = [];
 
-        // One transaction for the page, its links, the cap reservation and the new child rows: all or nothing.
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-        try
+        if (fetch.Outcome == FetchOutcome.Html)
         {
-            switch (fetch.Outcome)
-            {
-                case FetchOutcome.Html when !scope.Contains(fetch.FinalUrl):
-                    page.MarkSkipped($"Redirected off the site to {fetch.FinalUrl.Host}.", fetch.StatusCode, clock.GetUtcNow());
-                    break;
-
-                case FetchOutcome.Html:
-                    var links = LinkExtractor.Extract(fetch.Html!, fetch.FinalUrl);
-                    var counts = DomainLinkRatio.Count(links, scope);
-                    page.MarkFetched(fetch.FinalUrl, fetch.StatusCode ?? 200, counts.Total, counts.Internal, counts.Ratio, clock.GetUtcNow());
-
-                    foreach (var link in links)
-                    {
-                        db.Links.Add(PageLink.Create(job.Id, page.Id, link, scope.Contains(link)));
-                    }
-
-                    children = await DiscoverChildrenAsync(job, page, links.Where(scope.Contains).Select(l => scope.Canonicalize(l, seed)).ToList(), ct);
-                    break;
-
-                case FetchOutcome.NotHtml:
-                    page.MarkSkipped(fetch.Error!, fetch.StatusCode, clock.GetUtcNow());
-                    break;
-
-                default:
-                    page.MarkFailed(fetch.Error!, fetch.StatusCode, clock.GetUtcNow());
-                    break;
-            }
-
-            if (page.ParentPageId is null && page.Status != PageStatus.Fetched)
-            {
-                job.MarkFailed($"The starting page could not be crawled: {page.Error}", clock.GetUtcNow());
-            }
-
-            await db.SaveChangesAsync(ct);
-            await tx.CommitAsync(ct);
+            links = LinkExtractor.Extract(fetch.Html!, fetch.FinalUrl).Where(AddressGuard.IsPublicWebAddress).ToList();
         }
-        catch (DbUpdateException ex) when (Messaging.FailureKind.IsInfrastructureUnavailable(ex))
+
+        // Persist in one transaction: the page, its links, the cap reservation and the new child rows, all or nothing.
+        // If another worker inserted one of the same children in the same instant, retry the SAVE with a fresh view
+        // of what exists; the page is never downloaded again for that.
+        for (var attempt = 1; ; attempt++)
         {
-            logger.LogWarning(ex, "Database unavailable while saving job {JobId}; message will wait", job.Id);
-            return new ProcessResult(ProcessOutcome.InfrastructureUnavailable, "Database unavailable.");
-        }
-        catch (DbUpdateException ex)
-        {
-            // Another worker discovered the same child page in the same instant (unique index), or the job's
-            // status changed under us. Nothing is lost: the message is retried and the second pass finds the rows.
-            logger.LogWarning(ex, "Concurrent write on job {JobId}; message will be retried", job.Id);
-            return new ProcessResult(ProcessOutcome.Transient, "Concurrent write; retry.");
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            try
+            {
+                children.Clear();
+                switch (fetch.Outcome)
+                {
+                    case FetchOutcome.Html:
+                        var counts = DomainLinkRatio.Count(links, scope);
+                        page.MarkFetched(fetch.FinalUrl, fetch.StatusCode ?? 200, counts.Total, counts.Internal, counts.Ratio, clock.GetUtcNow());
+                        var existingEdges = (await db.Links.Where(l => l.ParentPageId == page.Id).Select(l => l.ChildUrl).ToListAsync(ct)).ToHashSet(StringComparer.Ordinal);
+                        foreach (var link in links.Where(l => !existingEdges.Contains(l.ToString())))
+                        {
+                            db.Links.Add(PageLink.Create(job.Id, page.Id, link, scope.Contains(link)));
+                        }
+
+                        children.AddRange(await DiscoverChildrenAsync(job, page, links.Where(scope.Contains).Select(l => scope.Canonicalize(l, seed)).ToList(), ct));
+                        break;
+
+                    case FetchOutcome.NotHtml:
+                    case FetchOutcome.OutOfScope:
+                        page.MarkSkipped(fetch.Error!, fetch.StatusCode, clock.GetUtcNow());
+                        break;
+
+                    default:
+                        page.MarkFailed(fetch.Error!, fetch.StatusCode, clock.GetUtcNow());
+                        break;
+                }
+
+                if (page.ParentPageId is null && page.Status != PageStatus.Fetched && !job.IsTerminal)
+                {
+                    job.MarkFailed($"The starting page could not be crawled: {page.Error}", clock.GetUtcNow());
+                }
+
+                await db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+                break;
+            }
+            catch (DbUpdateException ex) when (Messaging.FailureKind.IsInfrastructureUnavailable(ex))
+            {
+                logger.LogWarning(ex, "Database unavailable while saving job {JobId}; message will wait", job.Id);
+                return new ProcessResult(ProcessOutcome.InfrastructureUnavailable, "Database unavailable.");
+            }
+            catch (DbUpdateException ex) when (ex is not DbUpdateConcurrencyException && attempt < 3)
+            {
+                // Another worker discovered the same child page in the same instant (unique index). Drop our copies of the
+                // new rows and try the save again; the second pass sees theirs and skips them.
+                logger.LogInformation(ex, "Rows already written by another worker on job {JobId}; re-saving without them (attempt {Attempt})", job.Id, attempt);
+                foreach (var entry in db.ChangeTracker.Entries().Where(e => e.State == EntityState.Added).ToList())
+                {
+                    entry.State = EntityState.Detached;
+                }
+            }
+            catch (DbUpdateException ex)
+            {
+                // The job's status changed under us (canceled), or collisions kept happening: let the message be retried.
+                logger.LogWarning(ex, "Concurrent write on job {JobId}; message will be retried", job.Id);
+                return new ProcessResult(ProcessOutcome.Transient, "Concurrent write; retry.");
+            }
         }
 
         // Schedule children only after their rows are committed, so a message can never refer to a page that is not there yet.
@@ -157,9 +179,9 @@ public sealed class PageProcessor(
 
         var now = clock.GetUtcNow();
         page.MarkFailed($"Gave up after {message.Attempt} attempts: {reason}", null, now);
-        if (page.ParentPageId is null)
+        if (page.ParentPageId is null && !job.IsTerminal)
         {
-            job.MarkFailed($"The starting page could not be processed: {reason}", now);
+            job.MarkFailed($"The starting page could not be processed: {reason}", now); // never overrides Canceled
         }
 
         await db.SaveChangesAsync(ct);

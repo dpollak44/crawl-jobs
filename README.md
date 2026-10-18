@@ -63,7 +63,7 @@ Local development without containers: `docker compose up db broker`, then `dotne
 | `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                                                                                                                                                                                                 |
 | `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                                                                                                                                                                                                 |
 | `src/web`                    | React + Vite + TypeScript, one page: history first, a New crawl form in place, the selected job beside it with live progress and the tree. Structure: `api/` (client + types), `hooks/` (`useJob` live stream with polling fallback, `useHistory`, `useTree`), `components/`, `pages/Dashboard`, `lib/format`. Plain CSS with design tokens, no UI framework. |
-| `tests/*`                    | 83 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                                                                                                                                                                                            |
+| `tests/*`                    | 125 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                                                                                                                                                                                            |
 
 Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
 replaced, without starting anything.
@@ -113,8 +113,10 @@ mode without a reload. A production gateway must not buffer this endpoint (the r
 ## Crawling rules
 
 - **Normalization** (`UrlNormalizer`): resolve relative to the page it was found on; http(s) only; drop the
-  fragment; lowercase scheme and host; drop default ports; strip a trailing slash except on the root; keep
-  path case and the query string as written. Two spellings of one page produce one key, and that key is the
+  fragment; lowercase scheme and host; drop default ports; keep the path exactly as written, trailing slash
+  included (`/products/` and `/products` are different resources and relative links resolve differently from
+  each), and the query string as written. Links over 2,048 characters are ignored: they cannot be stored and
+  are never a page worth crawling. Two spellings of one page produce one key, and that key is the
   uniqueness rule in the database.
 - **Same site** (`SiteScope`): same host, ignoring a leading `www.` and ignoring the scheme. Subdomains are
   outside by default (the brief defines the domain as the host); `Crawl:IncludeSubdomains` flips that.
@@ -130,7 +132,12 @@ mode without a reload. A production gateway must not buffer this endpoint (the r
   when the reply is not HTML. Bodies are capped at 2 MB.
 - **Redirects**: followed by the fetcher itself, up to 5 hops, final address recorded. The .NET client
   refuses https→http redirects on principle; for a crawler the same host over http is the same site, so we
-  follow it. A redirect that leaves the site records the page as `Skipped`, not crawled.
+  follow it. Each hop is judged before anything is read: a redirect that leaves the site, or points at a
+  non-web or private address, records the page as `Skipped` and its body is never downloaded.
+- **Never inside our own network**: links and redirect targets to loopback, link-local, private ranges,
+  literal IPs in those ranges, `localhost`, `.local` and `.internal` are refused (`AddressGuard`). Names that
+  resolve to private addresses are a DNS-level check and a next step.
+- **Character set**: from the response header, else the page's own `<meta charset>`, else UTF-8.
 - **Domain Link Ratio** = same-site links / all links; 0 when a page has no links.
 
 ## Event-driven design
@@ -164,10 +171,11 @@ real, and the idempotency requirement means something.
 - Page, edges and newly discovered child rows are written in **one transaction**; child messages are
   published only after it commits, so a message can never refer to a page that is not there yet.
 - Two workers discovering the same child in the same instant: the unique index rejects the second insert;
-  that message is retried and the second pass finds the rows already present.
+  the worker drops its copy of the rows the other worker already wrote and saves again, without
+  re-downloading the page or spending an attempt.
 - **Sweeper.** A worker that dies after committing a page but before publishing its children would leave
   those children `Queued` with no message in flight. Every 60 s each worker re-publishes any page that has
-  had no message sent for more than 120 s on a job that is still running, stamping the page first so two
+  had no message sent for more than 300 s on a job that is still running, stamping the page first so two
   workers sweeping at once do not both re-send it. A page that was merely slow gets one duplicate message,
   which is ignored by design. Test:
   `PageProcessorTests.The_sweeper_republishes_pages_left_queued_too_long_on_running_jobs_only`.
@@ -262,7 +270,7 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
 | `Crawl:IncludeSubdomains`                                                      | false                            | Treat `blog.example.com` as inside `example.com`                                                |
 | `Crawl:FetchTimeoutSeconds` / `FetchRetries` / `MaxRedirects` / `MaxBodyBytes` | 10 / 2 / 5 / 2 MB                | Fetching limits                                                                                 |
 | `RabbitMq:RetryDelayMs` / `MaxAttempts` / `Prefetch`                           | 5000 / 3 / 8                     | Message retry policy; `Prefetch` is also the number of messages one worker handles concurrently |
-| `Crawl:SweepIntervalSeconds` / `StuckAfterSeconds`                             | 60 / 120                         | How often, and after how long, a `Queued` page with no message in flight is re-published        |
+| `Crawl:SweepIntervalSeconds` / `StuckAfterSeconds` | 60 / 300 | How often, and after how long, a `Queued` page with no message in flight is re-published        |
 | `Cors:Origins`                                                                 | `http://localhost:3000`, `:5173` | Addresses the UI may call from                                                                  |
 | `Paging:DefaultPageSize` / `MaxPageSize`                                       | 20 / 100                         | History paging                                                                                  |
 
@@ -322,13 +330,14 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
 - The "starting domain" is the host of the URL you typed, with `www.` ignored; `blog.example.com` is outside.
 - http and https on the same host are the same site. Query-string order and path capitalisation are kept as
   written, so `?a=1&b=2` and `?b=2&a=1` are two pages.
-- Trailing slashes are stripped, so sites that insist on them answer with a redirect, which we follow; it
-  costs one extra round trip per page on such sites.
 - Non-HTML links are requested to learn their type (headers only; the body is never read). A HEAD request
   first would save a round trip on some servers; not done.
 - Schema is created on boot, not migrated: a database created by an older build is not upgraded. After
   pulling a version that changes a table, reset with `docker compose down -v`. EF migrations as a release
   step are the fix (next steps). A job's pages and links are deleted with the job (cascade).
 - The page cap counts discovered pages, including ones that later fail or are skipped.
+- The sweeper cannot tell "waiting in a long queue" from "lost": on a very slow site a page can sit queued
+  longer than the 300 s threshold and be re-sent once; the duplicate is ignored on arrival, but a slow page can
+  be downloaded twice at once by two workers. An explicit in-progress state would remove that; it is a next step.
 - No authentication; the API trusts its network.
 - The UI's TypeScript types mirror the API contracts by hand; a generator would keep them in lockstep.

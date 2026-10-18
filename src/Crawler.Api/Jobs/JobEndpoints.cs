@@ -71,6 +71,7 @@ public static class JobEndpoints
         {
             logger.LogError(ex, "Job {JobId} could not be scheduled: broker unavailable", job.Id);
             job.MarkFailed("Could not schedule the crawl: the message broker is unavailable. Try again in a minute.", clock.GetUtcNow());
+            seed.MarkFailed("Never scheduled: the message broker was unavailable.", null, clock.GetUtcNow()); // nothing left Queued: the screen settles
             await db.SaveChangesAsync(CancellationToken.None);
         }
 
@@ -229,7 +230,7 @@ public static class JobEndpoints
 
         await db.SaveChangesAsync(ct);
         await announcer.AnnounceAsync(job.Id, CancellationToken.None);
-        return TypedResults.Ok(ToSummary(job, []));
+        return TypedResults.Ok((await LoadSummaryAsync(db, id, ct))!);
     }
 
     private static JobSummary ToSummary(CrawlJob job, Dictionary<PageStatus, int> counts)

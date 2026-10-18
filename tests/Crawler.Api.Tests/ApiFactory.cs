@@ -14,8 +14,17 @@ public sealed class RecordingPublisher : IPagePublisher
 {
     public List<CrawlPageMessage> Published { get; } = [];
 
+    /// <summary>When set, the next publish throws it (a broker outage), then the flag clears.</summary>
+    public Exception? FailNextWith { get; set; }
+
     public Task PublishAsync(CrawlPageMessage message, CancellationToken ct)
     {
+        if (FailNextWith is { } outage)
+        {
+            FailNextWith = null;
+            throw outage;
+        }
+
         Published.Add(message);
         return Task.CompletedTask;
     }

@@ -32,6 +32,9 @@ export function HistoryTable({
         );
     if (!data) return null;
 
+    const first = data.total === 0 ? 0 : (page - 1) * data.pageSize + 1;
+    const last = Math.min(page * data.pageSize, data.total);
+
     return (
         <div className="history">
             {error && (
@@ -102,27 +105,32 @@ export function HistoryTable({
                     </tbody>
                 </table>
             )}
-            {pages > 1 && (
-                <div className="pager">
-                    <button
-                        className="ghost"
-                        onClick={() => onPage(page - 1)}
-                        disabled={page <= 1}
-                    >
-                        Newer
-                    </button>
-                    <span className="muted small">
-                        page {page} of {pages}
+            <div className="pager">
+                <span className="muted small">
+                    Showing {first}–{last} of {data.total}
+                </span>
+                {pages > 1 && (
+                    <span className="pager-buttons">
+                        <button
+                            className="ghost"
+                            onClick={() => onPage(page - 1)}
+                            disabled={page <= 1}
+                        >
+                            Newer
+                        </button>
+                        <span className="muted small">
+                            page {page} of {pages}
+                        </span>
+                        <button
+                            className="ghost"
+                            onClick={() => onPage(page + 1)}
+                            disabled={page >= pages}
+                        >
+                            Older
+                        </button>
                     </span>
-                    <button
-                        className="ghost"
-                        onClick={() => onPage(page + 1)}
-                        disabled={page >= pages}
-                    >
-                        Older
-                    </button>
-                </div>
-            )}
+                )}
+            </div>
         </div>
     );
 }

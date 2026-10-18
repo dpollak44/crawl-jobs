@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { isSettled, isTerminal } from "../api/types";
 import { useJob } from "../hooks/useJob";
@@ -38,10 +39,10 @@ export function JobPanel({ jobId, onChanged }: Props) {
         );
     if (!job)
         return (
-            <div className="card panel">
-                <p className="error" role="alert">
-                    {error}
-                </p>
+            <div className="card panel empty-panel">
+                <p className="error" role="alert">{error}</p>
+                <p className="muted small">The address may belong to a job that no longer exists.</p>
+                <Link className="button-link" to="/">Show the latest crawl</Link>
             </div>
         );
 

@@ -26,4 +26,18 @@ public class SiteScopeTests
     {
         new SiteScope("example.com", includeSubdomains: true).Contains(new Uri(url)).ShouldBe(expected);
     }
+
+    [Theory]
+    [InlineData("http://shop.test/x?q=1", "https://shop.test/x?q=1")]   // other scheme: rewritten to the job's
+    [InlineData("https://www.shop.test/x", "https://shop.test/x")]       // www.: rewritten to the job's host
+    [InlineData("HTTP://WWW.shop.test/x", "https://shop.test/x")]
+    [InlineData("https://shop.test/x", "https://shop.test/x")]           // already the job's spelling: unchanged
+    [InlineData("https://elsewhere.test/x", "https://elsewhere.test/x")] // off-site: never touched
+    [InlineData("https://blog.shop.test/x", "https://blog.shop.test/x")] // a subdomain is off-site by default: never touched
+    public void Same_site_links_are_rewritten_to_the_jobs_own_scheme_and_host_so_one_page_has_one_key(string link, string expected)
+    {
+        var seed = new Uri("https://shop.test/");
+
+        new SiteScope(seed.Host).Canonicalize(new Uri(link), seed).ToString().ShouldBe(expected);
+    }
 }

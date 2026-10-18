@@ -29,7 +29,7 @@ public class JobEndpointsTests : IClassFixture<ApiFactory>
 
         var summary = (await _client.GetFromJsonAsync<JobSummary>($"/api/jobs/{created.JobId}")).ShouldNotBeNull();
         summary.Status.ShouldBe("Pending");
-        summary.Url.ShouldBe("https://example.com/Docs"); // normalized: lowercase host, fragment and trailing slash gone, path case kept
+        summary.Url.ShouldBe("https://example.com/Docs/"); // normalized: lowercase host, fragment gone, path kept as written
         summary.MaxDepth.ShouldBe(2);
         summary.MaxPages.ShouldBe(200);
         summary.Progress.Queued.ShouldBe(1);
@@ -38,12 +38,12 @@ public class JobEndpointsTests : IClassFixture<ApiFactory>
         var message = _factory.Publisher.Published.Where(m => m.JobId == created.JobId).ShouldHaveSingleItem(); // the factory is shared by the class
         message.JobId.ShouldBe(created.JobId);
         message.Depth.ShouldBe(0);
-        message.Url.ShouldBe("https://example.com/Docs");
+        message.Url.ShouldBe("https://example.com/Docs/");
     }
 
     [Theory]
     [InlineData("example.com", "https://example.com/")]
-    [InlineData("  www.Example.com/Docs/  ", "https://www.example.com/Docs")]
+    [InlineData("  www.Example.com/Docs/  ", "https://www.example.com/Docs/")]
     [InlineData("http://example.com", "http://example.com/")]
     public async Task An_address_without_a_scheme_is_accepted_and_assumed_https(string typed, string stored)
     {
@@ -109,7 +109,34 @@ public class JobEndpointsTests : IClassFixture<ApiFactory>
     }
 
     [Fact]
-    public async Task Tree_nests_pages_under_their_first_discovered_parent()
+    public async Task Paging_values_out_of_range_are_clamped_and_non_numbers_refused()
+    {
+        var page = (await _client.GetFromJsonAsync<Page<JobSummary>>("/api/jobs?page=0&pageSize=500")).ShouldNotBeNull();
+
+        page.PageNumber.ShouldBe(1);
+        page.PageSize.ShouldBe(100); // Paging:MaxPageSize in appsettings.json
+        (await _client.GetAsync("/api/jobs?page=abc")).StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task If_the_broker_is_down_when_a_job_is_created_the_job_is_failed_with_the_reason_not_left_pending()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+        factory.Publisher.FailNextWith = new IOException("connection refused");
+
+        var response = await client.PostAsJsonAsync("/api/jobs", new CreateJobRequest("https://outage.example.com", null, null));
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Accepted); // the job exists and can be opened
+        var jobId = (await response.Content.ReadFromJsonAsync<CreateJobResponse>())!.JobId;
+        var summary = (await client.GetFromJsonAsync<JobSummary>($"/api/jobs/{jobId}")).ShouldNotBeNull();
+        summary.Status.ShouldBe("Failed");
+        summary.FailureReason.ShouldNotBeNull().ShouldContain("message broker is unavailable");
+        factory.Publisher.Published.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Tree_nests_pages_under_their_first_discovered_parent_and_the_summary_counts_the_same_rows()
     {
         var create = await _client.PostAsJsonAsync("/api/jobs", new CreateJobRequest("https://tree.example.com", null, null));
         var jobId = (await create.Content.ReadFromJsonAsync<CreateJobResponse>())!.JobId;
@@ -137,6 +164,11 @@ public class JobEndpointsTests : IClassFixture<ApiFactory>
         tree.Children[0].Children.Single().Url.ShouldBe("https://tree.example.com/a/1");
         tree.Children[0].Children.Single().Depth.ShouldBe(2);
         tree.Children[1].Children.ShouldBeEmpty();
+
+        var summary = (await _client.GetFromJsonAsync<JobSummary>($"/api/jobs/{jobId}")).ShouldNotBeNull();
+        summary.Progress.Fetched.ShouldBe(1);
+        summary.Progress.Queued.ShouldBe(3);
+        summary.Progress.Failed.ShouldBe(0);
     }
 
     [Fact]

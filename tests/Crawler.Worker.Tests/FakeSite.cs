@@ -47,6 +47,40 @@ public sealed class FakeSite : HttpMessageHandler
         return this;
     }
 
+    /// <summary>Answers <paramref name="failures"/> times with <paramref name="status"/>, then serves the fixture. Exercises the HTTP retry policy.</summary>
+    public FakeSite Flaky(string url, int failures, HttpStatusCode status, string fixtureFile)
+    {
+        var html = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureFile));
+        var remaining = failures;
+        _replies[url] = () => remaining-- > 0
+            ? new HttpResponseMessage(status) { Content = new StringContent("try again later") }
+            : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(html, System.Text.Encoding.UTF8, "text/html") };
+        return this;
+    }
+
+    /// <summary>An HTML reply with no Content-Length header, so the body cap can only be enforced while reading.</summary>
+    public FakeSite HtmlWithoutLength(string url, string html)
+    {
+        _replies[url] = () =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new UnknownLengthContent(System.Text.Encoding.UTF8.GetBytes(html)) };
+            response.Content.Headers.ContentType = new MediaTypeHeaderValue("text/html");
+            return response;
+        };
+        return this;
+    }
+
+    private sealed class UnknownLengthContent(byte[] bytes) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => stream.WriteAsync(bytes).AsTask();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = -1;
+            return false;
+        }
+    }
+
     private readonly Dictionary<string, TimeSpan> _hangs = new(StringComparer.Ordinal);
 
     /// <summary>A server that takes this long to answer (then answers 200). Used to exercise the timeout policy.</summary>

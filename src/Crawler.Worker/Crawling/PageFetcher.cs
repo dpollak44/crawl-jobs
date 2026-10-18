@@ -1,3 +1,4 @@
+using Crawler.Domain.Crawling;
 using Crawler.Infrastructure;
 using Microsoft.Extensions.Options;
 using Polly.Timeout;
@@ -6,10 +7,11 @@ namespace Crawler.Worker.Crawling;
 
 public enum FetchOutcome
 {
-    Html,        // 2xx with an HTML body: parse it
-    NotHtml,     // 2xx but not a page (PDF, image, JSON): record and move on
-    HttpError,   // 4xx/5xx after retries, or a redirect loop
-    Unreachable, // DNS, connection, timeout after retries
+    Html,         // 2xx with an HTML body: parse it
+    NotHtml,      // 2xx but not a page (PDF, image, JSON): record and move on
+    HttpError,    // 4xx/5xx after retries, or a redirect loop
+    Unreachable,  // DNS, connection, timeout after retries
+    OutOfScope,   // a redirect led off the site or to a non-web / private address: nothing was read
 }
 
 public sealed record FetchResult(FetchOutcome Outcome, Uri FinalUrl, int? StatusCode, string? Html, string? Error);
@@ -25,7 +27,10 @@ public sealed record FetchResult(FetchOutcome Outcome, Uri FinalUrl, int? Status
 /// </summary>
 public sealed class PageFetcher(HttpClient http, IOptions<CrawlOptions> options)
 {
-    public async Task<FetchResult> FetchAsync(Uri url, CancellationToken ct)
+    public Task<FetchResult> FetchAsync(Uri url, CancellationToken ct) => FetchAsync(url, _ => true, ct);
+
+    /// <param name="mayFollow">Decides, before anything is read, whether a redirect target may be fetched (same site, public address).</param>
+    public async Task<FetchResult> FetchAsync(Uri url, Func<Uri, bool> mayFollow, CancellationToken ct)
     {
         var current = url;
         for (var hop = 0; hop <= options.Value.MaxRedirects; hop++)
@@ -59,7 +64,27 @@ public sealed class PageFetcher(HttpClient http, IOptions<CrawlOptions> options)
                         return new FetchResult(FetchOutcome.HttpError, current, status, null, $"HTTP {status} without a Location header.");
                     }
 
-                    current = location.IsAbsoluteUri ? location : new Uri(current, location);
+                    Uri next;
+                    try
+                    {
+                        next = location.IsAbsoluteUri ? location : new Uri(current, location);
+                    }
+                    catch (UriFormatException)
+                    {
+                        return new FetchResult(FetchOutcome.HttpError, current, status, null, $"HTTP {status} redirect to an unreadable address.");
+                    }
+
+                    if (!AddressGuard.IsPublicWebAddress(next))
+                    {
+                        return new FetchResult(FetchOutcome.OutOfScope, next, status, null, $"Redirected to a non-web or private address ({next.Scheme}://{next.Host}); not followed.");
+                    }
+
+                    if (!mayFollow(next))
+                    {
+                        return new FetchResult(FetchOutcome.OutOfScope, next, status, null, $"Redirected off the site to {next.Host}; not followed.");
+                    }
+
+                    current = next;
                     continue;
                 }
 
@@ -114,8 +139,20 @@ public sealed class PageFetcher(HttpClient http, IOptions<CrawlOptions> options)
             limited.Write(buffer, 0, read);
         }
 
-        var encoding = TryGetEncoding(response.Content.Headers.ContentType?.CharSet) ?? System.Text.Encoding.UTF8;
-        return new FetchResult(FetchOutcome.Html, finalUrl, status, encoding.GetString(limited.GetBuffer(), 0, (int)limited.Length), null);
+        var bytes = limited.GetBuffer();
+        var length = (int)limited.Length;
+        var encoding = TryGetEncoding(response.Content.Headers.ContentType?.CharSet) ?? TryGetEncoding(SniffMetaCharset(bytes, length)) ?? System.Text.Encoding.UTF8;
+        return new FetchResult(FetchOutcome.Html, finalUrl, status, encoding.GetString(bytes, 0, length), null);
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex MetaCharset = new("""charset\s*=\s*["']?\s*([A-Za-z0-9_\-]+)""", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>When the header does not say, the page's own &lt;meta charset&gt; in the first 2 KB usually does.</summary>
+    private static string? SniffMetaCharset(byte[] bytes, int length)
+    {
+        var head = System.Text.Encoding.ASCII.GetString(bytes, 0, Math.Min(length, 2048));
+        var m = MetaCharset.Match(head);
+        return m.Success ? m.Groups[1].Value : null;
     }
 
     private static System.Text.Encoding? TryGetEncoding(string? charset)

@@ -41,7 +41,8 @@ public sealed class CreateJobRequestValidator : AbstractValidator<CreateJobReque
     public CreateJobRequestValidator(int maxDepthLimit, int maxPagesLimit)
     {
         RuleFor(x => x.Url)
-            .NotEmpty().WithMessage("Enter the address of the page to start from.");
+            .NotEmpty().WithMessage("Enter the address of the page to start from.")
+            .MaximumLength(Crawler.Domain.Crawling.UrlNormalizer.MaxLength).WithMessage("That address is too long to crawl (limit 2,048 characters).");
         RuleFor(x => x.UrlWithScheme)
             .Must(u => Uri.TryCreate(u, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" && uri.Host.Contains('.'))
             .When(x => !string.IsNullOrWhiteSpace(x.Url))

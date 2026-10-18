@@ -76,14 +76,18 @@ public sealed class WorkerHarness : IDisposable
         return (job, seed);
     }
 
+    /// <summary>A processor over the given context, built as the consumer's scope builds it: the same resilience policy the worker runs with (see FetchPipeline), wrapped around the fake site.</summary>
+    public PageProcessor Processor(AppDbContext db)
+    {
+        var http = new HttpClient(new ResilienceHandler(FetchPipeline.Build(Options)) { InnerHandler = Site }, disposeHandler: false);
+        var fetcher = new PageFetcher(http, Microsoft.Extensions.Options.Options.Create(Options));
+        return new PageProcessor(db, fetcher, Queue, Announcer, Microsoft.Extensions.Options.Options.Create(Options), TimeProvider.System, NullLogger<PageProcessor>.Instance);
+    }
+
     public async Task<ProcessResult> ProcessAsync(CrawlPageMessage message)
     {
         await using var db = Db();
-        // The same resilience policy the worker runs with (see FetchPipeline), wrapped around the fake site.
-        var http = new HttpClient(new ResilienceHandler(FetchPipeline.Build(Options)) { InnerHandler = Site }, disposeHandler: false);
-        var fetcher = new PageFetcher(http, Microsoft.Extensions.Options.Options.Create(Options));
-        var processor = new PageProcessor(db, fetcher, Queue, Announcer, Microsoft.Extensions.Options.Options.Create(Options), TimeProvider.System, NullLogger<PageProcessor>.Instance);
-        return await processor.ProcessAsync(message, CancellationToken.None);
+        return await Processor(db).ProcessAsync(message, CancellationToken.None);
     }
 
     /// <summary>Act as a single worker: process messages until the queue is empty.</summary>

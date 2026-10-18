@@ -18,6 +18,8 @@ public class UrlNormalizerTests
     [InlineData("../pricing", "https://www.example.com/pricing")]
     [InlineData("/contact", "https://www.example.com/contact")]
     [InlineData("?page=2", "https://www.example.com/docs/guide.html?page=2")]
+    [InlineData("?t=10:30", "https://www.example.com/docs/guide.html?t=10:30")] // a colon in the query is not a scheme
+    [InlineData("  /contact  ", "https://www.example.com/contact")]           // surrounding whitespace is ignored
     public void Relative_links_resolve_against_the_page_they_were_found_on(string href, string expected)
     {
         Normalize(href).ShouldBe(expected);
@@ -43,10 +45,11 @@ public class UrlNormalizerTests
     }
 
     [Theory]
-    [InlineData("https://www.example.com/about/", "https://www.example.com/about")]
+    [InlineData("https://www.example.com/about/", "https://www.example.com/about/")]
+    [InlineData("https://www.example.com/about", "https://www.example.com/about")]
     [InlineData("https://www.example.com/", "https://www.example.com/")]
     [InlineData("https://www.example.com", "https://www.example.com/")]
-    public void A_trailing_slash_is_removed_except_on_the_root(string href, string expected)
+    public void The_path_is_kept_as_written_including_a_trailing_slash(string href, string expected)
     {
         Normalize(href).ShouldBe(expected);
     }
@@ -77,12 +80,36 @@ public class UrlNormalizerTests
         UrlNormalizer.TryNormalize(href, Page, out _).ShouldBeFalse();
     }
 
+    [Theory]
+    [InlineData("http://")]
+    [InlineData("https://exa mple.com/")]
+    [InlineData("http://[::1")]
+    public void A_malformed_href_is_rejected_rather_than_thrown(string href)
+    {
+        UrlNormalizer.TryNormalize(href, Page, out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Percent_encoding_does_not_split_one_page_into_two_keys()
+    {
+        Normalize("/a%20b").ShouldBe(Normalize("/a b"));
+        Normalize("/caf%C3%A9").ShouldBe(Normalize("/café"));
+    }
+
     [Fact]
     public void Two_spellings_of_one_page_produce_one_key()
     {
-        var a = Normalize("HTTPS://www.example.com/About/#team");
+        var a = Normalize("HTTPS://www.example.com/About#team");
         var b = Normalize("/About", new Uri("https://www.example.com/"));
 
         a.ShouldBe(b);
+    }
+
+    [Fact]
+    public void A_link_too_long_to_store_is_rejected()
+    {
+        var huge = "/download?token=" + new string('x', 3000);
+
+        UrlNormalizer.TryNormalize(huge, Page, out _).ShouldBeFalse();
     }
 }

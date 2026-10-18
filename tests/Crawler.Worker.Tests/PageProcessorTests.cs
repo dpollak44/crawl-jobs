@@ -78,7 +78,7 @@ public class PageProcessorTests : IDisposable
     [Fact]
     public async Task Delivering_the_same_message_twice_creates_no_duplicate_rows()
     {
-        var (job, seed) = await _h.StartJobAsync("https://shop.test/", maxDepth: 1);
+        var (job, _) = await _h.StartJobAsync("https://shop.test/", maxDepth: 1);
         var seedMessage = _h.Queue.Pending.Dequeue();
 
         (await _h.ProcessAsync(seedMessage)).Outcome.ShouldBe(ProcessOutcome.Done);
@@ -98,8 +98,6 @@ public class PageProcessorTests : IDisposable
             _h.Queue.AllPublished.Count.ShouldBeGreaterThan(publishedAfterFirst);
             _h.Queue.AllPublished.Skip(publishedAfterFirst).ShouldAllBe(m => m.JobId == job.Id && m.Depth == 1);
         }
-
-        seed.Id.ShouldNotBe(Guid.Empty);
     }
 
     [Fact]
@@ -202,11 +200,10 @@ public class PageProcessorTests : IDisposable
             (await db.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Running); // one page still Queued
         }
 
+        var announcedBefore = _h.Announcer.Announced.Count;
         await using (var db = _h.Db())
         {
-            var processor = new PageProcessor(db, new PageFetcher(new HttpClient(_h.Site, false), Microsoft.Extensions.Options.Options.Create(_h.Options)), _h.Queue, _h.Announcer,
-                Microsoft.Extensions.Options.Options.Create(_h.Options), TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<PageProcessor>.Instance);
-            await processor.GiveUpAsync(last with { Attempt = 3 }, "database unreachable", CancellationToken.None);
+            await _h.Processor(db).GiveUpAsync(last with { Attempt = 3 }, "database unreachable", CancellationToken.None);
         }
 
         await using var check = _h.Db();
@@ -214,6 +211,7 @@ public class PageProcessorTests : IDisposable
         page.Status.ShouldBe(PageStatus.Failed);
         page.Error.ShouldNotBeNull().ShouldContain("Gave up after 3 attempts");
         (await check.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Completed);
+        _h.Announcer.Announced.Count.ShouldBe(announcedBefore + 1); // the screen is told the job finished
     }
 
     [Fact]
@@ -314,12 +312,18 @@ public class PageProcessorTests : IDisposable
     }
 
     [Fact]
-    public async Task A_message_for_an_unknown_job_is_poison()
+    public async Task A_message_for_an_unknown_job_or_an_unknown_page_is_poison()
     {
-        var result = await _h.ProcessAsync(new CrawlPageMessage(Guid.NewGuid(), Guid.NewGuid(), "https://shop.test/", 0));
+        var (job, _) = await _h.StartJobAsync("https://shop.test/");
 
-        result.Outcome.ShouldBe(ProcessOutcome.Poison);
-        result.Reason.ShouldNotBeNull().ShouldContain("does not exist");
+        var noJob = await _h.ProcessAsync(new CrawlPageMessage(Guid.NewGuid(), Guid.NewGuid(), "https://shop.test/", 0));
+        var noPage = await _h.ProcessAsync(new CrawlPageMessage(job.Id, Guid.NewGuid(), "https://shop.test/", 0));
+
+        noJob.Outcome.ShouldBe(ProcessOutcome.Poison);
+        noJob.Reason.ShouldNotBeNull().ShouldContain("does not exist");
+        noPage.Outcome.ShouldBe(ProcessOutcome.Poison);
+        noPage.Reason.ShouldNotBeNull().ShouldContain("does not exist");
+        _h.Site.Requests.ShouldBe(0);
     }
 
     [Fact]
@@ -343,5 +347,134 @@ public class PageProcessorTests : IDisposable
         await using var check = _h.Db();
         (await check.Pages.CountAsync(p => p.JobId == job.Id && p.Status == PageStatus.Skipped)).ShouldBe(4);
         (await check.Jobs.SingleAsync(x => x.Id == job.Id)).Status.ShouldBe(JobStatus.Canceled);
+    }
+
+    [Theory]
+    [InlineData(1, PageStatus.Fetched, 2)] // one 503, then the page: fetched on the retry
+    [InlineData(9, PageStatus.Failed, 3)]  // never recovers: 1 attempt + 2 retries, then recorded as the site's failure
+    public async Task A_server_error_is_retried_by_the_http_policy_and_recorded_only_once_the_budget_is_spent(int failures, PageStatus expected, int requests)
+    {
+        _h.Options.FetchRetries = 2;
+        _h.Site.Flaky("https://shop.test/flaky", failures, System.Net.HttpStatusCode.ServiceUnavailable, "leaf.html");
+        var (job, _) = await _h.StartJobAsync("https://shop.test/flaky");
+
+        var result = await _h.ProcessAsync(_h.Queue.Pending.Dequeue());
+
+        result.Outcome.ShouldBe(ProcessOutcome.Done); // HTTP retries happen inside the fetch; the queue never sees them
+        _h.Site.Requests.ShouldBe(requests);
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(expected);
+        if (expected == PageStatus.Failed)
+        {
+            page.Error.ShouldNotBeNull().ShouldContain("HTTP 503");
+        }
+    }
+
+    [Theory]
+    [InlineData(true, "Page is 4 KB; limit is 1 KB.")]           // the server declares Content-Length: refused before a byte of body is read
+    [InlineData(false, "Page exceeds the 1 KB limit; not parsed.")] // no Content-Length: refused the moment the cap is crossed while reading
+    public async Task A_page_over_the_body_limit_is_skipped_with_the_reason_and_never_parsed(bool declaresLength, string reason)
+    {
+        _h.Options.MaxBodyBytes = 1024;
+        var big = "<html><body>" + new string('x', 4096) + "<a href='/about'>About</a></body></html>";
+        if (declaresLength)
+        {
+            _h.Site.Reply("https://shop.test/big", System.Net.HttpStatusCode.OK, "text/html", big);
+        }
+        else
+        {
+            _h.Site.HtmlWithoutLength("https://shop.test/big", big);
+        }
+
+        var (job, _) = await _h.StartJobAsync("https://shop.test/big");
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(PageStatus.Skipped);
+        page.Error.ShouldBe(reason);
+        (await db.Links.CountAsync(l => l.JobId == job.Id)).ShouldBe(0);                      // the link inside was never seen
+        (await db.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Failed); // it was the starting page, so the job says why
+    }
+
+    [Fact]
+    public async Task A_row_already_written_by_another_worker_is_skipped_and_the_page_still_completes_in_one_pass()
+    {
+        var (job, seed) = await _h.StartJobAsync("https://shop.test/", maxDepth: 1);
+        await using (var db = _h.Db())
+        {
+            // Another worker got there first with one of this page's edges and one of its children.
+            db.Links.Add(PageLink.Create(job.Id, seed.Id, new Uri("https://shop.test/about"), isInternal: true));
+            db.Pages.Add(CrawlPage.Discover(job.Id, new Uri("https://shop.test/products"), 1, seed.Id, _h.Now));
+            await db.SaveChangesAsync();
+        }
+
+        var result = await _h.ProcessAsync(_h.Queue.Pending.Dequeue());
+
+        result.Outcome.ShouldBe(ProcessOutcome.Done); // no refetch, no attempt spent
+        _h.Site.Requests.ShouldBe(1);
+        await using var check = _h.Db();
+        (await check.Pages.SingleAsync(p => p.Id == seed.Id)).Status.ShouldBe(PageStatus.Fetched);
+        (await check.Links.CountAsync(l => l.ParentPageId == seed.Id)).ShouldBe(5);                       // the pre-existing edge once, the other four added
+        (await check.Pages.CountAsync(p => p.JobId == job.Id && p.Depth == 1)).ShouldBe(4);              // products (theirs) + about, contact, brochure.pdf (ours)
+        _h.Queue.Pending.Select(m => m.Url).ShouldNotContain("https://shop.test/products");               // we never re-schedule their row
+    }
+
+    [Fact]
+    public async Task A_stale_copy_of_a_job_cannot_overwrite_a_final_status()
+    {
+        var (job, _) = await _h.StartJobAsync("https://shop.test/");
+        await using var workerDb = _h.Db();
+        await using var apiDb = _h.Db();
+        var workersCopy = await workerDb.Jobs.SingleAsync(j => j.Id == job.Id);
+        var apisCopy = await apiDb.Jobs.SingleAsync(j => j.Id == job.Id);
+
+        apisCopy.Cancel(_h.Now).IsSuccess.ShouldBeTrue();
+        await apiDb.SaveChangesAsync();                             // the user canceled while the worker was busy
+        workersCopy.MarkCompleted(_h.Now).IsSuccess.ShouldBeTrue(); // the worker, none the wiser, tries to finish it
+
+        await Should.ThrowAsync<DbUpdateConcurrencyException>(() => workerDb.SaveChangesAsync());
+        await using var check = _h.Db();
+        (await check.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Canceled);
+    }
+    [Fact]
+    public async Task A_redirect_to_a_private_address_is_refused_before_anything_is_read()
+    {
+        _h.Site.Redirect("https://shop.test/leak", "http://169.254.169.254/latest/meta-data");
+        var (job, _) = await _h.StartJobAsync("https://shop.test/leak");
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(PageStatus.Skipped);
+        page.Error.ShouldNotBeNull().ShouldContain("private");
+        _h.Site.Requests.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_give_up_on_the_starting_page_never_turns_a_canceled_job_into_a_failed_one()
+    {
+        var (job, seed) = await _h.StartJobAsync("https://shop.test/");
+        var message = _h.Queue.Pending.Dequeue();
+        await using (var db = _h.Db())
+        {
+            var j = await db.Jobs.SingleAsync(x => x.Id == job.Id);
+            j.Cancel(_h.Now).IsSuccess.ShouldBeTrue();
+            await db.SaveChangesAsync();
+        }
+
+        await using (var db = _h.Db())
+        {
+            var processor = new PageProcessor(db, new PageFetcher(new HttpClient(_h.Site, false), Microsoft.Extensions.Options.Options.Create(_h.Options)), _h.Queue, _h.Announcer,
+                Microsoft.Extensions.Options.Options.Create(_h.Options), TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<PageProcessor>.Instance);
+            await processor.GiveUpAsync(message with { Attempt = 3 }, "database unreachable", CancellationToken.None);
+        }
+
+        await using var check = _h.Db();
+        (await check.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Canceled);
+        (await check.Pages.SingleAsync(p => p.Id == seed.Id)).Status.ShouldBe(PageStatus.Failed);
     }
 }

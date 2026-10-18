@@ -15,8 +15,7 @@ public static class LinkExtractor
     {
         var document = Parser.ParseDocument(html);
 
-        // Relative links resolve against the page's address AS FETCHED (trailing slash intact): "/products/" + "widget"
-        // is "/products/widget". The normalized form (slash stripped) is only for comparing identity.
+        // Relative links resolve against the page's address as fetched: "/products/" + "widget" is "/products/widget".
         var selfKey = UrlNormalizer.TryNormalize(pageUrl.ToString(), pageUrl, out var normalizedSelf) ? normalizedSelf.ToString() : pageUrl.ToString();
 
         // <base href> changes how relative links resolve; honour it like a browser would.

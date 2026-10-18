@@ -6,11 +6,15 @@ namespace Crawler.Domain.Crawling;
 /// idempotency key for the pages table.
 ///
 /// Rules: resolve relative to the page it was found on; http(s) only; drop the fragment; lowercase scheme
-/// and host; drop a default port; strip a trailing slash except on the root; keep path case and the query
-/// string exactly as written (both can be significant).
+/// and host; drop a default port; keep the path exactly as written, including a trailing slash, because
+/// "/products/" and "/products" are different resources and relative links resolve differently from each;
+/// keep the query string as written. Reject anything longer than MaxLength: it cannot be stored and is never
+/// a page worth crawling.
 /// </summary>
 public static class UrlNormalizer
 {
+    public const int MaxLength = 2048;
+
     public static bool TryNormalize(string? href, Uri baseUri, out Uri normalized)
     {
         normalized = null!;
@@ -54,9 +58,9 @@ public static class UrlNormalizer
             builder.Port = -1; // default port: omit it
         }
 
-        if (builder.Path.Length > 1 && builder.Path.EndsWith('/'))
+        if (builder.Uri.ToString().Length > MaxLength)
         {
-            builder.Path = builder.Path.TrimEnd('/');
+            return false;
         }
 
         normalized = builder.Uri;

@@ -18,6 +18,7 @@ public class LinkExtractorAndRatioTests
         [
             "https://www.example.com/products/widget",
             "https://www.example.com/about",
+            "https://www.example.com/about/",
             "https://www.example.com/pricing?plan=pro",
             "https://partner.example.org/",
             "https://docs.example.com/start",
@@ -31,9 +32,9 @@ public class LinkExtractorAndRatioTests
 
         var counts = DomainLinkRatio.Count(links, Scope);
 
-        counts.Internal.ShouldBe(3);
-        counts.Total.ShouldBe(5);
-        counts.Ratio.ShouldBe(0.6m);
+        counts.Internal.ShouldBe(4);
+        counts.Total.ShouldBe(6);
+        counts.Ratio.ShouldBe(0.6667m);
     }
 
     [Fact]
@@ -43,8 +44,8 @@ public class LinkExtractorAndRatioTests
 
         var counts = DomainLinkRatio.Count(links, new SiteScope("www.example.com", includeSubdomains: true));
 
-        counts.Internal.ShouldBe(4);
-        counts.Ratio.ShouldBe(0.8m);
+        counts.Internal.ShouldBe(5);
+        counts.Ratio.ShouldBe(0.8333m);
     }
 
     [Fact]
@@ -64,6 +65,17 @@ public class LinkExtractorAndRatioTests
 
         DomainLinkRatio.Count(offsite, Scope).Ratio.ShouldBe(0m);
         DomainLinkRatio.Count(onsite, Scope).Ratio.ShouldBe(1m);
+    }
+
+    [Theory]
+    [InlineData(1, 3, "0.3333")]
+    [InlineData(2, 3, "0.6667")] // half-up, so 0.66666 does not become 0.6666
+    [InlineData(1, 8, "0.125")]
+    [InlineData(0, 0, "0")]
+    [InlineData(5, 5, "1")]
+    public void The_ratio_is_rounded_to_four_places_for_storage(int internalLinks, int total, string expected)
+    {
+        new LinkCounts(internalLinks, total).Ratio.ShouldBe(decimal.Parse(expected, System.Globalization.CultureInfo.InvariantCulture));
     }
 
     [Fact]

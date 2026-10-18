@@ -19,7 +19,7 @@ export function StartCrawlForm({ onStarted, onClose }: Props) {
         try {
             const { jobId } = await api.createJob(
                 url.trim(),
-                maxDepth === "" ? undefined : Number(maxDepth),
+                maxDepth === "" ? undefined : Math.round(Number(maxDepth)),
             );
             onStarted(jobId);
         } catch (err) {
@@ -50,10 +50,7 @@ export function StartCrawlForm({ onStarted, onClose }: Props) {
                 </label>
                 <label className="field depth">
                     <span>Depth</span>
-                    <input
-                        type="number"
-                        min={0}
-                        max={5}
+                    <input type="number" min={0} max={5} step={1}
                         value={maxDepth}
                         onChange={(e) => setMaxDepth(e.target.value)}
                         disabled={submitting}

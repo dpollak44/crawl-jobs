@@ -45,7 +45,7 @@ public sealed class SiteScope
             return link;
         }
 
-        return new UriBuilder(link) { Scheme = seed.Scheme, Host = seed.Host, Port = -1 }.Uri;
+        return new UriBuilder(link) { Scheme = seed.Scheme, Host = seed.Host, Port = link.IsDefaultPort ? -1 : link.Port }.Uri;
     }
 
     private static string Strip(string host)
