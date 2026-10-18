@@ -1,0 +1,30 @@
+root = true
+
+[*]
+indent_style = space
+indent_size = 4
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{json,yml,yaml,md}]
+indent_size = 2
+
+[*.cs]
+csharp_style_namespace_declarations = file_scoped:warning
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+dotnet_sort_system_directives_first = true
+# CA1812 (unused internal class) false-positives on DI-registered validators
+dotnet_diagnostic.CA1812.severity = none
+# CA1515 wants types internal; public endpoints/records are intentional in a small API
+dotnet_diagnostic.CA1515.severity = none
+
+[tests/**.cs]
+# Test names read as sentences: Create_rejects_a_non_positive_amount
+dotnet_diagnostic.CA1707.severity = none
+
+[src/**.cs]
+# CA1848/CA1873 want source-generated LoggerMessage delegates; plain ILogger calls are the right size for this service
+dotnet_diagnostic.CA1848.severity = none
+dotnet_diagnostic.CA1873.severity = none
