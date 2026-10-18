@@ -81,6 +81,15 @@ replaced, without starting anything.
 Errors follow Problem Details: `400` names the field and says what to change; `404`; `409` states the rule
 ("A Canceled job cannot be canceled"); `500` carries a reference id and never a stack trace.
 
+### Live progress
+
+`GET /api/jobs/{id}/events` streams the job summary as Server-Sent Events: the current summary on connect, a
+line whenever it changes, then `event: done` once the job is final and nothing is queued. The job page opens
+one stream and the browser does not poll; the API re-reads the summary once a second per open stream. If the
+stream cannot be opened or drops, the page falls back to polling every two seconds, which stays in the code
+as the safety net. A production gateway must not buffer this endpoint (the response sets
+`X-Accel-Buffering: no`).
+
 ## Crawling rules
 
 - **Normalization** (`UrlNormalizer`): resolve relative to the page it was found on; http(s) only; drop the
@@ -254,8 +263,9 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
 
 - **Kafka**: RabbitMQ has native dead-lettering and TTL-based retry; the brief's requirements map onto it
   directly with no extra code.
-- **Live push to the UI** (SSE/SignalR): polling every two seconds meets the requirement at a fraction of
-  the cost. The polling loop stops at a final state.
+- **Worker-announced progress**: the live stream is driven by the API re-reading the database once a second
+  per open stream, not by the worker announcing changes. Right-sized for this scale; the announce-and-relay
+  version is in next steps.
 - **Following off-site links**: unbounded and discourteous. Counted, recorded as edges, never fetched.
 - **Subdomains as same-site**: the brief defines the domain as the host. Left as a switch, off by default.
 - **An outbox**: if the broker is down when a job is created, the job is marked `Failed` with the reason
@@ -274,7 +284,9 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
   after creation; the outbox removes the up-to-120-second delay and the `Failed` outcome at creation.
 - Scheduled reprocessing of the dead-letter queue with a cap, and an alert rule on the Error log line.
 - EF migrations as a release step; Testcontainers for Postgres and RabbitMQ in CI.
-- Live progress over SSE; the web container replaced by a CDN; the API behind a gateway.
+- Worker-announced progress: the worker publishes "job X changed" to a fanout exchange and the API relays it
+  to open streams, replacing the one-second re-read with a notification plus a safety re-read. The web
+  container replaced by a CDN; the API behind a gateway.
 - Politeness: robots.txt, a per-host delay, a shared rate limit across workers.
 - **Per-site body limit.** The 2 MB page limit is a safety rule for the unknown internet, and some legitimate
   sites exceed it (one tested home page is 13 MB of HTML and takes ~48 s to download; today it is recorded as

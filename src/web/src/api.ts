@@ -44,7 +44,9 @@ export interface Page<T> {
     total: number;
 }
 
-const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
+export const API_BASE =
+    (import.meta.env.VITE_API_URL as string | undefined) ?? "";
+const BASE = API_BASE;
 
 export class ApiError extends Error {
     constructor(

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Crawler.Domain.Crawling;
 using Crawler.Domain.Model;
 using Crawler.Infrastructure;
@@ -22,6 +23,10 @@ public static class JobEndpoints
         group.MapPost("/", CreateAsync);
         group.MapGet("/", HistoryAsync);
         group.MapGet("/{id:guid}", GetAsync);
+        group.MapGet("/{id:guid}/events", StreamAsync)
+            .WithDescription("Live progress as Server-Sent Events: the current summary on connect, then a line whenever it changes, then `event: done`. Same JSON as GET /api/jobs/{id}.")
+            .Produces(StatusCodes.Status200OK, contentType: "text/event-stream")
+            .Produces(StatusCodes.Status404NotFound);
         group.MapGet("/{id:guid}/tree", TreeAsync);
         group.MapPost("/{id:guid}/cancel", CancelAsync);
 
@@ -74,10 +79,73 @@ public static class JobEndpoints
 
     private static async Task<Results<Ok<JobSummary>, NotFound>> GetAsync(Guid id, AppDbContext db, CancellationToken ct)
     {
+        var summary = await LoadSummaryAsync(db, id, ct);
+        return summary is null ? TypedResults.NotFound() : TypedResults.Ok(summary);
+    }
+
+    private static readonly JsonSerializerOptions SseJson = new(JsonSerializerDefaults.Web);
+
+    /// <summary>
+    /// Live progress over Server-Sent Events. The browser stops polling; the API reads the summary once a second
+    /// per open stream and writes a line only when something changed. Ends with `event: done` once the job is final
+    /// and no page is still queued. A closed browser cancels the request and ends the loop.
+    /// </summary>
+    private static async Task StreamAsync(Guid id, HttpContext http, AppDbContext db, CancellationToken ct)
+    {
+        var current = await LoadSummaryAsync(db, id, ct);
+        if (current is null)
+        {
+            http.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        http.Response.StatusCode = StatusCodes.Status200OK;
+        http.Response.ContentType = "text/event-stream";
+        http.Response.Headers.CacheControl = "no-cache";
+        http.Response.Headers.Connection = "keep-alive";
+        http.Response.Headers["X-Accel-Buffering"] = "no"; // tell a reverse proxy not to buffer this response
+
+        string? lastSent = null;
+        try
+        {
+            while (true)
+            {
+                var json = JsonSerializer.Serialize(current, SseJson);
+                if (json != lastSent)
+                {
+                    await http.Response.WriteAsync($"data: {json}\n\n", ct);
+                    await http.Response.Body.FlushAsync(ct);
+                    lastSent = json;
+                }
+
+                var isFinal = current.Status is not ("Pending" or "Running") && current.Progress.Queued == 0;
+                if (isFinal)
+                {
+                    await http.Response.WriteAsync("event: done\ndata: {}\n\n", ct);
+                    await http.Response.Body.FlushAsync(ct);
+                    return;
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                current = await LoadSummaryAsync(db, id, ct);
+                if (current is null)
+                {
+                    return; // job deleted underneath us: nothing more to say
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // the browser went away; that is the normal way a stream ends early
+        }
+    }
+
+    private static async Task<JobSummary?> LoadSummaryAsync(AppDbContext db, Guid id, CancellationToken ct)
+    {
         var job = await db.Jobs.AsNoTracking().FirstOrDefaultAsync(j => j.Id == id, ct);
         if (job is null)
         {
-            return TypedResults.NotFound();
+            return null;
         }
 
         var counts = await db.Pages.AsNoTracking().Where(p => p.JobId == id)
@@ -85,7 +153,7 @@ public static class JobEndpoints
             .Select(g => new { Status = g.Key, Count = g.Count() })
             .ToListAsync(ct);
 
-        return TypedResults.Ok(ToSummary(job, counts.ToDictionary(c => c.Status, c => c.Count)));
+        return ToSummary(job, counts.ToDictionary(c => c.Status, c => c.Count));
     }
 
     private static async Task<Ok<Page<JobSummary>>> HistoryAsync(int? page, int? pageSize, AppDbContext db, IConfiguration config, CancellationToken ct)

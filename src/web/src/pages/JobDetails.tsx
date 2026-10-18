@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, ApiError, JobSummary, TreeNode } from "../api";
+import { api, ApiError, API_BASE, JobSummary, TreeNode } from "../api";
 
 const POLL_MS = 2000;
 const isTerminal = (s: JobSummary["status"]) =>
     s === "Completed" || s === "Failed" || s === "Canceled";
+
+type Mode = "live" | "polling";
 
 export function JobDetails() {
     const { jobId = "" } = useParams();
@@ -12,9 +14,43 @@ export function JobDetails() {
     const [tree, setTree] = useState<TreeNode | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [canceling, setCanceling] = useState(false);
+    const [mode, setMode] = useState<Mode>("live");
 
-    // Poll every two seconds until the job reaches a final state, then fetch the tree once.
+    // Live mode: one open stream from the API; the browser does not poll. Any stream error drops to polling.
     useEffect(() => {
+        if (mode !== "live" || typeof EventSource === "undefined") {
+            if (typeof EventSource === "undefined") setMode("polling");
+            return;
+        }
+        const source = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
+        let finished = false;
+        source.onmessage = (e) => {
+            setJob(JSON.parse(e.data) as JobSummary);
+            setError(null);
+        };
+        source.addEventListener("done", async () => {
+            finished = true;
+            source.close();
+            try {
+                setTree(await api.getTree(jobId));
+            } catch (err) {
+                setError(
+                    err instanceof ApiError
+                        ? err.message
+                        : "Could not load the results.",
+                );
+            }
+        });
+        source.onerror = () => {
+            source.close();
+            if (!finished) setMode("polling"); // the fallback below takes over
+        };
+        return () => source.close();
+    }, [jobId, mode]);
+
+    // Fallback: poll every two seconds until the job reaches a final state and nothing is queued, then fetch the tree once.
+    useEffect(() => {
+        if (mode !== "polling") return;
         let stopped = false;
         let timer: number | undefined;
 
@@ -49,7 +85,7 @@ export function JobDetails() {
             stopped = true;
             if (timer) window.clearTimeout(timer);
         };
-    }, [jobId]);
+    }, [jobId, mode]);
 
     async function onCancel() {
         setCanceling(true);
@@ -73,6 +109,7 @@ export function JobDetails() {
         );
     const j = job!;
     const done = j.progress.fetched + j.progress.failed + j.progress.skipped;
+    const settled = isTerminal(j.status) && j.progress.queued === 0;
 
     return (
         <section className="stack">
@@ -121,7 +158,10 @@ export function JobDetails() {
                     {j.progress.failed > 0 && ` · ${j.progress.failed} failed`}
                     {j.progress.skipped > 0 &&
                         ` · ${j.progress.skipped} skipped`}
-                    {!isTerminal(j.status) && " · refreshing every 2 s"}
+                    {!settled &&
+                        (mode === "live"
+                            ? " · live"
+                            : " · refreshing every 2 s")}
                 </p>
             </div>
 
@@ -136,7 +176,7 @@ export function JobDetails() {
                 </p>
             )}
 
-            {isTerminal(j.status) && !tree && j.status !== "Failed" && (
+            {settled && !tree && j.status !== "Failed" && (
                 <p className="muted">Loading results…</p>
             )}
             {tree && (
