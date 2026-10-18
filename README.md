@@ -62,7 +62,7 @@ Local development without containers: `docker compose up db broker`, then `dotne
 | `src/Crawler.Infrastructure` | Postgres (EF Core) and RabbitMQ: table mapping, queue topology, the message contract, shared host defaults (JSON logs, health checks). Shared by API and worker so they can never disagree. |
 | `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                               |
 | `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                               |
-| `src/web`                    | React + Vite + TypeScript. Three screens.                                                                                                                                                   |
+| `src/web` | React + Vite + TypeScript, one page: history first, a New crawl form in place, the selected job beside it with live progress and the tree. Structure: `api/` (client + types), `hooks/` (`useJob` live stream with polling fallback, `useHistory`, `useTree`), `components/`, `pages/Dashboard`, `lib/format`. Plain CSS with design tokens, no UI framework. |
 | `tests/*`                    | 83 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
 
 Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
@@ -80,6 +80,14 @@ replaced, without starting anything.
 
 Errors follow Problem Details: `400` names the field and says what to change; `404`; `409` states the rule
 ("A Canceled job cannot be canceled"); `500` carries a reference id and never a stack trace.
+
+### The UI
+
+One page. The job list is the first thing on screen, newest first, refreshing on its own while anything is
+running; **New crawl** opens the form in place; the selected job sits beside the list with its status,
+timings, live progress bar and, once final, the page tree with each page's ratio drawn as a small bar. The
+URL carries the selection (`/jobs/{id}`), so a job can be linked to. Loading, empty and error states are
+explicit. The brief's three screens (start, job details, history) are the three regions of this one page.
 
 ### Live progress
 

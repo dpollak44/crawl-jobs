@@ -13,8 +13,9 @@ A job-based crawler as two .NET 8 services and a React UI, run with one `docker 
   model (page rows exist before their messages; unique keys on pages and edges; status check before any
   fetch); a message that exhausts its retries still leaves the page `Failed` and the job in a final state.
 - **Postgres** with three tables and indexes shaped by the queries the system actually runs.
-- **UI**: start, job details with live progress over Server-Sent Events (polling as the fallback), tree on
-  completion, history; clear loading and error states.
+- **UI**: one page with the job list first, a New crawl form in place, and the selected job beside it: live
+  progress over Server-Sent Events (polling as the fallback), the page tree on completion, explicit loading,
+  empty and error states. Structured as an API client, hooks, components and one page.
 - **Live progress end to end**: the worker announces "job X changed" on a fanout exchange; each API instance
   relays it to its open streams after one database read per job; a 10 s safety re-read covers a lost
   announcement. The announcement carries no data: the database stays the only source of truth.

@@ -1,52 +1,7 @@
-// The UI's whole knowledge of the API: three shapes and five calls. Mirrors Crawler.Api/Jobs/JobContracts.cs.
-// Kept by hand rather than generated: two languages, three small shapes, no build step worth adding.
-
-export type JobStatus =
-    "Pending" | "Running" | "Completed" | "Failed" | "Canceled";
-
-export interface JobProgress {
-    discovered: number;
-    fetched: number;
-    failed: number;
-    skipped: number;
-    queued: number;
-}
-
-export interface JobSummary {
-    jobId: string;
-    url: string;
-    status: JobStatus;
-    maxDepth: number;
-    maxPages: number;
-    createdAt: string;
-    startedAt: string | null;
-    completedAt: string | null;
-    failureReason: string | null;
-    progress: JobProgress;
-}
-
-export interface TreeNode {
-    pageId: string;
-    url: string;
-    depth: number;
-    status: "Queued" | "Fetched" | "Failed" | "Skipped";
-    domainLinkRatio: number;
-    internalLinks: number;
-    outgoingLinks: number;
-    error: string | null;
-    children: TreeNode[];
-}
-
-export interface Page<T> {
-    items: T[];
-    pageNumber: number;
-    pageSize: number;
-    total: number;
-}
+import type { JobSummary, Page, TreeNode } from "./types";
 
 export const API_BASE =
     (import.meta.env.VITE_API_URL as string | undefined) ?? "";
-const BASE = API_BASE;
 
 export class ApiError extends Error {
     constructor(
@@ -60,7 +15,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let response: Response;
     try {
-        response = await fetch(`${BASE}${path}`, {
+        response = await fetch(`${API_BASE}${path}`, {
             ...init,
             headers: { "content-type": "application/json", ...init?.headers },
         });
@@ -79,7 +34,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     return (await response.json()) as T;
 }
 
-// The API answers errors as Problem Details; surface the human-readable part, never a raw status code alone.
+// The API answers errors as Problem Details; surface the human-readable part, never a bare status code.
 async function readProblem(response: Response): Promise<string> {
     try {
         const body = await response.json();
@@ -108,4 +63,9 @@ export const api = {
         ),
     cancel: (jobId: string) =>
         request<JobSummary>(`/api/jobs/${jobId}/cancel`, { method: "POST" }),
+    /** The live stream address; EventSource cannot go through fetch, so the hook opens it directly. */
+    eventsUrl: (jobId: string) => `${API_BASE}/api/jobs/${jobId}/events`,
 };
+
+export const errorMessage = (err: unknown, fallback: string): string =>
+    err instanceof ApiError ? err.message : fallback;
