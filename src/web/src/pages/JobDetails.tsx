@@ -24,7 +24,9 @@ export function JobDetails() {
                 if (stopped) return;
                 setJob(next);
                 setError(null);
-                if (isTerminal(next.status)) {
+                // A canceled job reaches its final status while in-flight pages are still being settled;
+                // keep polling until nothing is queued, so the tree shown is the final one.
+                if (isTerminal(next.status) && next.progress.queued === 0) {
                     if (next.status !== "Failed" || next.progress.fetched > 0) {
                         setTree(await api.getTree(jobId));
                     }
