@@ -50,7 +50,8 @@ services:
       broker:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null || exit 1"]
+      # bash alone can open a socket, so the slim runtime image needs no extra tool for its health check
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q Healthy <&3"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -66,12 +67,12 @@ services:
       ASPNETCORE_URLS: http://+:8081
       ConnectionStrings__Default: Host=db;Port=5432;Database=crawler;Username=crawler;Password=crawler
       RabbitMq__Host: broker
-    # No host port, so `docker compose up --scale worker=3` works. Health: docker compose exec worker wget -qO- http://localhost:8081/health
+    # No host port, so `docker compose up --scale worker=3` works. Health shows in `docker compose ps`.
     depends_on:
       api:
         condition: service_healthy   # the API creates the schema; the worker starts after it exists
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health >/dev/null || exit 1"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q Healthy <&3"]
       interval: 5s
       timeout: 3s
       retries: 20

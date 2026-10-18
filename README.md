@@ -14,14 +14,14 @@ Requires Docker. One command brings up five containers (Postgres, RabbitMQ, API,
 docker compose up --build
 ```
 
-| What                                | Where                              |
-| ----------------------------------- | ---------------------------------- |
-| UI                                  | http://localhost:3000              |
-| API + interactive docs              | http://localhost:8080/swagger      |
-| API health (checks DB and broker)   | http://localhost:8080/health       |
-| Worker health | `docker compose exec worker wget -qO- http://localhost:8081/health` (no host port, so workers can be scaled) |
-| RabbitMQ management (guest / guest) | http://localhost:15672             |
-| Postgres                            | localhost:5433 (crawler / crawler) |
+| What                                | Where                                                                                               |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------- |
+| UI                                  | http://localhost:3000                                                                               |
+| API + interactive docs              | http://localhost:8080/swagger                                                                       |
+| API health (checks DB and broker)   | http://localhost:8080/health                                                                        |
+| Worker health                       | shown by `docker compose ps` (checked inside the container; no host port, so workers can be scaled) |
+| RabbitMQ management (guest / guest) | http://localhost:15672                                                                              |
+| Postgres                            | localhost:5433 (crawler / crawler)                                                                  |
 
 Try it: type `quotes.toscrape.com` into the UI with depth 1 (no scheme needed; https is assumed). It finishes
 in about ten seconds. More workers: `docker compose up --scale worker=3`; nothing else changes (see "Scaling").
@@ -143,7 +143,7 @@ real, and the idempotency requirement means something.
   which is ignored by design. Test:
   `PageProcessorTests.The_sweeper_republishes_pages_left_queued_too_long_on_running_jobs_only`.
 - The page cap is a counter on the job row raised only by one conditional `UPDATE … SET PagesDiscovered =
-  PagesDiscovered + n WHERE PagesDiscovered + n <= MaxPages`, inside the same transaction as the new rows, so
+PagesDiscovered + n WHERE PagesDiscovered + n <= MaxPages`, inside the same transaction as the new rows, so
   several workers can reserve at once and the sum can never exceed the cap. The job's status is a concurrency
   token, so a worker holding a stale copy can never overwrite a canceled or failed job.
 
@@ -160,11 +160,11 @@ Tests: `PageProcessorTests.Delivering_the_same_message_twice_creates_no_duplicat
 
 Two different failures, handled differently:
 
-| Failure                                                                                                      | Who retries                      | Policy                                                                                                                                                                   | Then                                                                                                           |
-| ------------------------------------------------------------------------------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| The target website is slow or down (timeout on headers or body, 5xx, 408, 429, connection refused) | HTTP client (`FetchPipeline`) | 10 s per attempt, 2 retries with backoff and jitter, a total timeout, a separate clock on the body read. No circuit breaker: one would be shared by every site, so a single dead site would stop every job; a per-host breaker is next | Page recorded as `Failed` with the reason; the job continues. If the starting page fails, the job is `Failed`. |
-| Our own infrastructure **unreachable** (Postgres or RabbitMQ down: connection refused, socket timeout, broker closed) | Message pipeline | Republished to `crawl.pages.retry` with the **same** attempt number, so the message waits at the 5 s cadence until the outage ends. An outage never spends the attempt budget and never dead-letters healthy pages. If the broker itself is down, the message is handed back to the queue unacked |
-| A one-off failure in our own code (unique-index race between workers, concurrency conflict, unexpected exception) | Message pipeline | Republished to `crawl.pages.retry` with `attempt + 1`; the retry queue holds it 5 s (`x-message-ttl`) then dead-letters it back onto the work exchange; up to 3 attempts | Page marked `Failed` ("gave up after 3 attempts"), job completion re-checked, message to the dead-letter queue |
+| Failure                                                                                                               | Who retries                   | Policy                                                                                                                                                                                                                                                                                            | Then                                                                                                           |
+| --------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| The target website is slow or down (timeout on headers or body, 5xx, 408, 429, connection refused)                    | HTTP client (`FetchPipeline`) | 10 s per attempt, 2 retries with backoff and jitter, a total timeout, a separate clock on the body read. No circuit breaker: one would be shared by every site, so a single dead site would stop every job; a per-host breaker is next                                                            | Page recorded as `Failed` with the reason; the job continues. If the starting page fails, the job is `Failed`. |
+| Our own infrastructure **unreachable** (Postgres or RabbitMQ down: connection refused, socket timeout, broker closed) | Message pipeline              | Republished to `crawl.pages.retry` with the **same** attempt number, so the message waits at the 5 s cadence until the outage ends. An outage never spends the attempt budget and never dead-letters healthy pages. If the broker itself is down, the message is handed back to the queue unacked |
+| A one-off failure in our own code (unique-index race between workers, concurrency conflict, unexpected exception)     | Message pipeline              | Republished to `crawl.pages.retry` with `attempt + 1`; the retry queue holds it 5 s (`x-message-ttl`) then dead-letters it back onto the work exchange; up to 3 attempts                                                                                                                          | Page marked `Failed` ("gave up after 3 attempts"), job completion re-checked, message to the dead-letter queue |
 
 "Transient" means: it may succeed if tried again without anyone changing anything. A 404 on a page is not
 transient; a database connection reset is.
@@ -211,6 +211,10 @@ conditional cap reservation, the status concurrency token on jobs, and the sweep
 re-sends them. Within one worker, `RabbitMq:Prefetch` messages are processed concurrently. All five containers
 restart automatically unless stopped.
 
+Measured: one job of 120 pages (depth 2) with `--scale worker=3` completed in 12 s; the three workers fetched
+41 / 41 / 39 pages, every page exactly once (120 rows, 120 distinct addresses), no retries needed, nothing
+dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14 collisions retried.)
+
 ## Observability
 
 - Structured JSON logs outside Development. Every worker log line carries `JobId`, `PageId` and `Attempt`
@@ -222,16 +226,16 @@ restart automatically unless stopped.
 
 ## Configuration
 
-| Key                                                                            | Default                          | Meaning                                          |
-| ------------------------------------------------------------------------------ | -------------------------------- | ------------------------------------------------ |
-| `Crawl:DefaultMaxDepth` / `MaxDepthLimit`                                      | 2 / 5                            | Default and ceiling for a job's depth            |
-| `Crawl:DefaultMaxPages` / `MaxPagesLimit`                                      | 200 / 1000                       | Default and ceiling for a job's page cap         |
-| `Crawl:IncludeSubdomains`                                                      | false                            | Treat `blog.example.com` as inside `example.com` |
-| `Crawl:FetchTimeoutSeconds` / `FetchRetries` / `MaxRedirects` / `MaxBodyBytes` | 10 / 2 / 5 / 2 MB                | Fetching limits                                  |
+| Key                                                                            | Default                          | Meaning                                                                                         |
+| ------------------------------------------------------------------------------ | -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `Crawl:DefaultMaxDepth` / `MaxDepthLimit`                                      | 2 / 5                            | Default and ceiling for a job's depth                                                           |
+| `Crawl:DefaultMaxPages` / `MaxPagesLimit`                                      | 200 / 1000                       | Default and ceiling for a job's page cap                                                        |
+| `Crawl:IncludeSubdomains`                                                      | false                            | Treat `blog.example.com` as inside `example.com`                                                |
+| `Crawl:FetchTimeoutSeconds` / `FetchRetries` / `MaxRedirects` / `MaxBodyBytes` | 10 / 2 / 5 / 2 MB                | Fetching limits                                                                                 |
 | `RabbitMq:RetryDelayMs` / `MaxAttempts` / `Prefetch`                           | 5000 / 3 / 8                     | Message retry policy; `Prefetch` is also the number of messages one worker handles concurrently |
-| `Crawl:SweepIntervalSeconds` / `StuckAfterSeconds` | 60 / 120 | How often, and after how long, a `Queued` page with no message in flight is re-published |
-| `Cors:Origins`                                                                 | `http://localhost:3000`, `:5173` | Addresses the UI may call from                   |
-| `Paging:DefaultPageSize` / `MaxPageSize`                                       | 20 / 100                         | History paging                                   |
+| `Crawl:SweepIntervalSeconds` / `StuckAfterSeconds`                             | 60 / 120                         | How often, and after how long, a `Queued` page with no message in flight is re-published        |
+| `Cors:Origins`                                                                 | `http://localhost:3000`, `:5173` | Addresses the UI may call from                                                                  |
+| `Paging:DefaultPageSize` / `MaxPageSize`                                       | 20 / 100                         | History paging                                                                                  |
 
 ## What I implemented first, and why
 
@@ -272,7 +276,18 @@ restart automatically unless stopped.
 - EF migrations as a release step; Testcontainers for Postgres and RabbitMQ in CI.
 - Live progress over SSE; the web container replaced by a CDN; the API behind a gateway.
 - Politeness: robots.txt, a per-host delay, a shared rate limit across workers.
-- Horizontal scale: the design already allows N workers (`docker compose up --scale worker=3`); measure it.
+- **Per-site body limit.** The 2 MB page limit is a safety rule for the unknown internet, and some legitimate
+  sites exceed it (one tested home page is 13 MB of HTML and takes ~48 s to download; today it is recorded as
+  skipped with that reason and the crawl stops beneath it). Next: an optional per-site override, granted when
+  the site is verified legitimate and its other pages crawl cleanly, still under a hard ceiling and the
+  body-read timeout. Deliberately not a blanket increase, which would only move the problem to the next
+  bigger site.
+- **AI-assisted operations decisions.** Approving a per-site override, judging whether a skipped site is
+  legitimate, or deciding whether a dead-lettered message is worth replaying are judgement calls a human
+  makes today. Next: an AI step that researches the site on the web (reputation, ownership, whether its
+  other pages crawled cleanly) and recommends, inside fixed guard rails: a hard ceiling it cannot raise, a
+  logged reason for every recommendation, and a human review only for the cases it cannot decide with
+  confidence. The aim is that most of these decisions need no person at all.
 
 ## Assumptions and known limitations
 
@@ -283,7 +298,9 @@ restart automatically unless stopped.
   costs one extra round trip per page on such sites.
 - Non-HTML links are requested to learn their type (headers only; the body is never read). A HEAD request
   first would save a round trip on some servers; not done.
-- Schema is created on boot, not migrated. A job's pages and links are deleted with the job (cascade).
+- Schema is created on boot, not migrated: a database created by an older build is not upgraded. After
+  pulling a version that changes a table, reset with `docker compose down -v`. EF migrations as a release
+  step are the fix (next steps). A job's pages and links are deleted with the job (cascade).
 - The page cap counts discovered pages, including ones that later fail or are skipped.
 - No authentication; the API trusts its network.
 - The UI's TypeScript types mirror the API contracts by hand; a generator would keep them in lockstep.

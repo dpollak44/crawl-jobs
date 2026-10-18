@@ -20,7 +20,6 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 ARG PROJECT
 WORKDIR /app
 COPY --from=build /app .
-RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
 USER $APP_UID
 ENV PROJECT_DLL=${PROJECT}.dll
 ENTRYPOINT ["sh", "-c", "dotnet $PROJECT_DLL"]
