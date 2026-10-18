@@ -46,12 +46,12 @@ public sealed class CreateJobRequestValidator : AbstractValidator<CreateJobReque
         RuleFor(x => x.UrlWithScheme)
             .Must(u => Uri.TryCreate(u, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" && LooksLikeHost(uri))
             .When(x => !string.IsNullOrWhiteSpace(x.Url))
-            .WithName("Url")
+            .OverridePropertyName("Url")
             .WithMessage("That does not look like a website address. Try something like example.com or https://example.com/page.");
         RuleFor(x => x.UrlWithScheme)
             .Must(u => !Uri.TryCreate(u, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || !LooksLikeHost(uri) || Crawler.Domain.Crawling.AddressGuard.IsPublicWebAddress(uri)) // only when the shape rule above passed
             .When(x => !string.IsNullOrWhiteSpace(x.Url))
-            .WithName("Url")
+            .OverridePropertyName("Url")
             .WithMessage("Only public websites can be crawled; private or internal addresses are refused.");
         RuleFor(x => x.MaxDepth).InclusiveBetween(0, maxDepthLimit).When(x => x.MaxDepth.HasValue)
             .WithMessage($"Depth must be between 0 and {maxDepthLimit}.");
