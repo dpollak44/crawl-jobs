@@ -14,7 +14,7 @@ A job-based crawler as two .NET 8 services and a React UI, run with one `docker 
   fetch); a message that exhausts its retries still leaves the page `Failed` and the job in a final state.
 - **Postgres** with three tables and indexes shaped by the queries the system actually runs.
 - **UI**: start, job details with polling, progress and tree, history; clear loading and error states.
-- **65 tests**: the rules in isolation, the API over real HTTP, and the worker's whole page step against
+- **66 tests**: the rules in isolation, the API over real HTTP, and the worker's whole page step against
   fixture HTML with a fake internet and an in-memory queue, including the same message delivered twice.
 - Structured logs with job and page ids, health endpoints for both services, CI that builds and tests.
 
@@ -37,5 +37,6 @@ A job-based crawler as two .NET 8 services and a React UI, run with one `docker 
 I spent the time on correctness of the rules, the integrity of the message design, and a live run against
 real Postgres and RabbitMQ before building the UI. I cut Kafka, push updates, off-site crawling, subdomain
 scope, real-infrastructure tests, authentication and politeness controls, each for a stated reason in the
-README. The one known way a job can stall (a worker dying between committing a page and publishing its
-children) is documented with its fix, an outbox and a sweeper, as the first thing I would build next.
+README. A worker dying between committing a page and publishing its children is recovered by a sweeper that
+re-publishes pages left queued too long; the remaining gap, a broker outage at the moment a job is created,
+is documented with its fix, an outbox, as the first thing I would build next.

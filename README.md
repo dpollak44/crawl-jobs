@@ -62,7 +62,7 @@ Local development without containers: `docker compose up db broker`, then `dotne
 | `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                               |
 | `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                               |
 | `src/web`                    | React + Vite + TypeScript. Three screens.                                                                                                                                                   |
-| `tests/*`                    | 65 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
+| `tests/*`                    | 66 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
 
 Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
 replaced, without starting anything.
@@ -131,6 +131,11 @@ real, and the idempotency requirement means something.
   published only after it commits, so a message can never refer to a page that is not there yet.
 - Two workers discovering the same child in the same instant: the unique index rejects the second insert;
   that message is retried and the second pass finds the rows already present.
+- **Sweeper.** A worker that dies after committing a page but before publishing its children would leave
+  those children `Queued` with no message in flight. Every 60 s each worker re-publishes any page that has
+  sat `Queued` for more than 120 s on a job that is still running. A page that was merely slow gets a
+  duplicate message, which is ignored by design. Test:
+  `PageProcessorTests.The_sweeper_republishes_pages_left_queued_too_long_on_running_jobs_only`.
 - The page cap is a counter on the job row, guarded by a concurrency token, raised only while below the
   cap: two workers cannot both slip past 200.
 
@@ -200,6 +205,7 @@ release step; see next steps.
 | `Crawl:IncludeSubdomains`                                                      | false                            | Treat `blog.example.com` as inside `example.com` |
 | `Crawl:FetchTimeoutSeconds` / `FetchRetries` / `MaxRedirects` / `MaxBodyBytes` | 10 / 2 / 5 / 2 MB                | Fetching limits                                  |
 | `RabbitMq:RetryDelayMs` / `MaxAttempts` / `Prefetch`                           | 5000 / 3 / 8                     | Message retry policy and worker concurrency      |
+| `Crawl:SweepIntervalSeconds` / `StuckAfterSeconds` | 60 / 120 | How often, and after how long, a `Queued` page with no message in flight is re-published |
 | `Cors:Origins`                                                                 | `http://localhost:3000`, `:5173` | Addresses the UI may call from                   |
 | `Paging:DefaultPageSize` / `MaxPageSize`                                       | 20 / 100                         | History paging                                   |
 
@@ -225,7 +231,8 @@ release step; see next steps.
 - **Following off-site links**: unbounded and discourteous. Counted, recorded as edges, never fetched.
 - **Subdomains as same-site**: the brief defines the domain as the host. Left as a switch, off by default.
 - **An outbox**: if the broker is down when a job is created, the job is marked `Failed` with the reason
-  rather than left `Pending` forever. The full outbox pattern is the right fix and is next.
+  rather than left `Pending` forever. The sweeper covers a lost message after creation; the full outbox
+  pattern, which also covers creation, is next.
 - **Tests against real Postgres and RabbitMQ**: replaced by a fixture test with the two outside dependencies
   faked, plus the compose run as the real-world proof. Testcontainers would be the next step.
 - **Authentication, rate limiting, robots.txt**: nothing in the brief needs them; each is a line in next steps.
@@ -234,11 +241,9 @@ release step; see next steps.
 
 ## What I would do next
 
-- **Outbox and sweeper.** Write the message into the database in the same transaction as the job or page
-  row and relay it, so a broker outage can never lose a job; and a sweeper that re-publishes pages left
-  `Queued` too long. Today, if a worker dies after committing a page but before publishing its children,
-  those children stay `Queued` until the parent happens to be redelivered, and after an ack it is not.
-  This is the one known way a job can stall.
+- **Outbox.** Write the message into the database in the same transaction as the job or page row and relay
+  it, so even a broker outage at job creation cannot lose a job. The sweeper already recovers a lost message
+  after creation; the outbox removes the up-to-120-second delay and the `Failed` outcome at creation.
 - **Atomic cap counter.** The page cap uses an optimistic concurrency token, so two workers discovering
   children on the same job at the same moment cost one retry (5 s). Under heavy parallelism the counter
   should become a single `UPDATE … SET pages_discovered = pages_discovered + 1 WHERE pages_discovered < max`.
