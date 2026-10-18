@@ -109,27 +109,25 @@ export function HistoryTable({
                 <span className="muted small">
                     Showing {first}–{last} of {data.total}
                 </span>
-                {pages > 1 && (
-                    <span className="pager-buttons">
-                        <button
-                            className="ghost"
-                            onClick={() => onPage(page - 1)}
-                            disabled={page <= 1}
-                        >
-                            Newer
-                        </button>
-                        <span className="muted small">
-                            page {page} of {pages}
-                        </span>
-                        <button
-                            className="ghost"
-                            onClick={() => onPage(page + 1)}
-                            disabled={page >= pages}
-                        >
-                            Older
-                        </button>
+                <span className="pager-buttons">
+                    <button
+                        className="ghost"
+                        onClick={() => onPage(page - 1)}
+                        disabled={page <= 1}
+                    >
+                        Newer
+                    </button>
+                    <span className="muted small">
+                        page {page} of {pages}
                     </span>
-                )}
+                    <button
+                        className="ghost"
+                        onClick={() => onPage(page + 1)}
+                        disabled={page >= pages}
+                    >
+                        Older
+                    </button>
+                </span>
             </div>
         </div>
     );
