@@ -127,3 +127,16 @@ button:disabled { opacity: 0.55; cursor: default; }
 .button-link:hover { background: var(--accent-strong); text-decoration: none; }
 
 .pager-buttons { display: inline-flex; align-items: center; gap: 0.6rem; }
+
+/* Narrow screens: the table scrolls inside its own region; the document never scrolls sideways */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: var(--radius); }
+.table-scroll.stale { opacity: 0.6; }
+.history table { min-width: 560px; }
+.pager { flex-wrap: wrap; gap: 0.5rem; }
+.tiny { padding: 0.15rem 0.5rem; font-size: 0.8rem; }
+.job-id { font-size: 0.85rem; overflow-wrap: anywhere; }
+.fact-wide { grid-column: 1 / -1; }
+/* Long host names wrap instead of widening the page */
+.panel-head > div:first-child { min-width: 0; flex: 1; }
+.panel-head h2 { overflow-wrap: anywhere; }
+.tree-section > p, .panel-head a { overflow-wrap: anywhere; }

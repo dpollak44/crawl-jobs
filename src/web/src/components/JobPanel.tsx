@@ -7,6 +7,7 @@ import { useTree } from "../hooks/useTree";
 import { StatusBadge } from "./StatusBadge";
 import { PageTree } from "./PageTree";
 import { duration, formatDateTime, hostOf } from "../lib/format";
+import { useState as useCopiedState } from "react";
 
 interface Props {
     jobId: string;
@@ -18,6 +19,7 @@ export function JobPanel({ jobId, onChanged }: Props) {
     const { job, setJob, error, setError, mode } = useJob(jobId);
     const { tree, error: treeError, loading: treeLoading } = useTree(job);
     const [canceling, setCanceling] = useState(false);
+    const [copied, setCopied] = useCopiedState(false);
 
     async function onCancel() {
         setCanceling(true);
@@ -51,6 +53,16 @@ export function JobPanel({ jobId, onChanged }: Props) {
     const settled = isSettled(job);
     const took = duration(job.startedAt, job.completedAt);
 
+    async function copyId() {
+        try {
+            await navigator.clipboard.writeText(job!.jobId);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1500);
+        } catch {
+            /* clipboard unavailable: the id is still selectable text */
+        }
+    }
+
     return (
         <div className="card panel">
             <header className="panel-head">
@@ -78,23 +90,22 @@ export function JobPanel({ jobId, onChanged }: Props) {
                     )}
                 </div>
             </header>
-
             <dl className="facts">
-                <div>
-                    <dt>Depth</dt>
-                    <dd>{job.maxDepth}</dd>
+                <div className="fact-wide">
+                    <dt>Job id</dt>
+                    <dd>
+                        <code className="job-id">{job.jobId}</code>{" "}
+                        <button className="ghost tiny" onClick={copyId} aria-label="Copy job id">{copied ? "Copied" : "Copy"}</button>
+                    </dd>
                 </div>
-                <div>
-                    <dt>Page cap</dt>
-                    <dd>{job.maxPages}</dd>
-                </div>
-                <div>
-                    <dt>Started</dt>
-                    <dd>{formatDateTime(job.startedAt ?? job.createdAt)}</dd>
-                </div>
+                <div><dt>Depth</dt><dd>{job.maxDepth}</dd></div>
+                <div><dt>Page cap</dt><dd>{job.maxPages}</dd></div>
+                <div><dt>Created</dt><dd>{formatDateTime(job.createdAt)}</dd></div>
+                <div><dt>Started</dt><dd>{job.startedAt ? formatDateTime(job.startedAt) : "Not started"}</dd></div>
+                <div><dt>Completed</dt><dd>{job.completedAt ? formatDateTime(job.completedAt) : "—"}</dd></div>
                 {took && (
                     <div>
-                        <dt>Finished in</dt>
+                        <dt>Took</dt>
                         <dd>{took}</dd>
                     </div>
                 )}

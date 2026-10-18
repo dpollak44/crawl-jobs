@@ -26,11 +26,7 @@ function Node({ node }: { node: TreeNode }) {
         <li>
             <div className="node">
                 {hasChildren ? (
-                    <button
-                        className="twisty"
-                        onClick={() => setOpen((o) => !o)}
-                        aria-label={open ? "Collapse" : "Expand"}
-                    >
+                    <button className="twisty" onClick={() => setOpen((o) => !o)} aria-label={open ? "Collapse" : "Expand"} aria-expanded={open}>
                         {open ? "▾" : "▸"}
                     </button>
                 ) : (

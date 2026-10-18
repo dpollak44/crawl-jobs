@@ -8,6 +8,9 @@ const REFRESH_MS = 4000;
 /**
  * The job list, newest first. Refreshes on demand (after a new crawl) and on its own every few seconds while
  * any listed job is still running, so statuses and counts in the table move without a reload.
+ *
+ * `page` is the page that was asked for; `shownPage` is the page the rows on screen actually belong to (taken
+ * from the API's reply). Labels follow `shownPage`, so a slow or failed request never mislabels the table.
  */
 export function useHistory() {
     const [page, setPage] = useState(1);
@@ -20,6 +23,7 @@ export function useHistory() {
 
     useEffect(() => {
         let stale = false;
+        setLoading(true);
         api.history(page, PAGE_SIZE)
             .then((d) => {
                 if (!stale) {
@@ -46,6 +50,7 @@ export function useHistory() {
         return () => window.clearInterval(timer);
     }, [anyActive, refresh]);
 
-    const pages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
-    return { data, error, loading, page, pages, setPage, refresh };
+    const pages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
+    const shownPage = data?.pageNumber ?? page;
+    return { data, error, loading, page, shownPage, pages, setPage, refresh };
 }
