@@ -73,15 +73,15 @@ public sealed class PageProcessor(
             await db.SaveChangesAsync(ct); // the screen says Running while the first page downloads, not after
         }
 
-        var scope = new SiteScope(job.StartHost, options.Value.IncludeSubdomains);
         var seed = new Uri(job.InputUrl);
+        var scope = new SiteScope(job.StartHost, options.Value.IncludeSubdomains);
         var fetch = await fetcher.FetchAsync(new Uri(page.Url), target => scope.Contains(target), ct);
         var children = new List<CrawlPage>();
         IReadOnlyList<Uri> links = [];
 
         if (fetch.Outcome == FetchOutcome.Html)
         {
-            links = LinkExtractor.Extract(fetch.Html!, fetch.FinalUrl).Where(AddressGuard.IsPublicWebAddress).ToList();
+            links = LinkExtractor.Extract(fetch.Html!, fetch.FinalUrl); // all of them count; what may be fetched is decided below
         }
 
         // Persist in one transaction: the page, its links, the cap reservation and the new child rows, all or nothing.
@@ -104,7 +104,9 @@ public sealed class PageProcessor(
                             db.Links.Add(PageLink.Create(job.Id, page.Id, link, scope.Contains(link)));
                         }
 
-                        children.AddRange(await DiscoverChildrenAsync(job, page, links.Where(scope.Contains).Select(l => scope.Canonicalize(l, seed)).ToList(), ct));
+                        // Collecting a link and being allowed to fetch it are different decisions: a private address is
+                        // counted like any other link, but never scheduled (and the connect-time guard refuses it anyway).
+                        children.AddRange(await DiscoverChildrenAsync(job, page, links.Where(l => scope.Contains(l) && AddressGuard.IsPublicWebAddress(l)).Select(l => scope.Canonicalize(l, seed)).ToList(), ct));
                         break;
 
                     case FetchOutcome.NotHtml:
@@ -131,7 +133,7 @@ public sealed class PageProcessor(
                 logger.LogWarning(ex, "Database unavailable while saving job {JobId}; message will wait", job.Id);
                 return new ProcessResult(ProcessOutcome.InfrastructureUnavailable, "Database unavailable.");
             }
-            catch (DbUpdateException ex) when (ex is not DbUpdateConcurrencyException && attempt < 3)
+            catch (DbUpdateException ex) when (Messaging.FailureKind.IsUniqueViolation(ex) && attempt < 3)
             {
                 // Another worker discovered the same child page in the same instant (unique index). Drop our copies of the
                 // new rows and try the save again; the second pass sees theirs and skips them.
@@ -143,9 +145,11 @@ public sealed class PageProcessor(
             }
             catch (DbUpdateException ex)
             {
-                // The job's status changed under us (canceled), or collisions kept happening: let the message be retried.
-                logger.LogWarning(ex, "Concurrent write on job {JobId}; message will be retried", job.Id);
-                return new ProcessResult(ProcessOutcome.Transient, "Concurrent write; retry.");
+                // The job's or the page's status changed under us (canceled; a racing copy of this page already saved), or
+                // collisions kept happening, or the database rejected the data: let the message be retried, and the retry
+                // sees the page's real state (a duplicate is acked; a bad row is given up after the attempt budget).
+                logger.LogWarning(ex, "Save rejected on job {JobId}; message will be retried", job.Id);
+                return new ProcessResult(ProcessOutcome.Transient, $"Save rejected: {ex.GetBaseException().Message}");
             }
         }
 
@@ -185,7 +189,7 @@ public sealed class PageProcessor(
         }
 
         await db.SaveChangesAsync(ct);
-        logger.LogError("Page {PageId} marked Failed after {Attempt} attempts: {Reason}", page.Id, message.Attempt, reason);
+        logger.LogWarning("Page {PageId} marked Failed after {Attempt} attempts: {Reason}", page.Id, message.Attempt, reason);
         await CompleteIfFinishedAsync(job, ct);
         await announcer.AnnounceAsync(job.Id, ct);
     }

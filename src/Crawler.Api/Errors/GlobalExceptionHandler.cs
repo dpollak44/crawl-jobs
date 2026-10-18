@@ -14,6 +14,11 @@ public sealed class GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logge
     public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
     {
         var reference = httpContext.TraceIdentifier;
+        if (httpContext.RequestAborted.IsCancellationRequested)
+        {
+            logger.LogDebug("Request {Reference} was abandoned by the client", reference); // nothing to tell, nobody to tell it to
+            return true;
+        }
 
         var (status, title, detail) = exception switch
         {

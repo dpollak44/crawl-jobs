@@ -67,7 +67,7 @@ public static class JobEndpoints
             await publisher.PublishAsync(new CrawlPageMessage(job.Id, seed.Id, seed.Url, 0), CancellationToken.None);
             logger.LogInformation("Job {JobId} created for {Url} (depth {MaxDepth}, cap {MaxPages})", job.Id, job.InputUrl, job.MaxDepth, job.MaxPages);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             logger.LogError(ex, "Job {JobId} could not be scheduled", job.Id);
             var reason = ex is UnroutableMessageException
@@ -89,15 +89,15 @@ public static class JobEndpoints
 
     private static readonly JsonSerializerOptions SseJson = new(JsonSerializerDefaults.Web);
 
+    private static readonly TimeSpan SafetyReread = TimeSpan.FromSeconds(10);
+
     /// <summary>
     /// Live progress over Server-Sent Events. The browser stops polling. The stream writes the summary on connect,
     /// then whenever the relay pushes a change (the worker announced "job X changed" and the relay read the summary
     /// once for every open stream), with a safety re-read every 10 s in case an announcement was lost. Ends with
     /// `event: done` once the job is final and no page is still queued. A closed browser cancels the request.
     /// </summary>
-    private static readonly TimeSpan SafetyReread = TimeSpan.FromSeconds(10);
-
-    private static async Task StreamAsync(Guid id, HttpContext http, AppDbContext db, ProgressRelay relay, CancellationToken ct)
+    private static async Task StreamAsync(Guid id, HttpContext http, AppDbContext db, ProgressRelay relay, ILogger<CrawlJob> logger, CancellationToken ct)
     {
         var current = await LoadSummaryAsync(db, id, ct);
         if (current is null)
@@ -144,7 +144,18 @@ public static class JobEndpoints
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    current = await LoadSummaryAsync(db, id, ct);
+                    try
+                    {
+                        current = await LoadSummaryAsync(db, id, ct);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        // Headers are already out, so the middleware cannot help: tell the browser and let it reconnect.
+                        logger.LogWarning(ex, "Live stream for job {JobId} could not re-read the summary; ending the stream", id);
+                        await http.Response.WriteAsync("event: error\ndata: {}\n\n", CancellationToken.None);
+                        return;
+                    }
+
                     if (current is null)
                     {
                         return; // job deleted underneath us: nothing more to say
@@ -205,7 +216,7 @@ public static class JobEndpoints
             return TypedResults.Problem("This job has no starting page recorded.", statusCode: StatusCodes.Status409Conflict);
         }
 
-        var nodes = pages.ToDictionary(p => p.Id, p => new TreeNode(p.Id, p.Url, p.Depth, StatusText.Of(p.Status), p.DomainLinkRatio, p.InternalLinks, p.OutgoingLinks, p.Error, []));
+        var nodes = pages.ToDictionary(p => p.Id, p => new TreeNode(p.Id, p.Url, p.Depth, p.Status.ToString(), p.DomainLinkRatio, p.InternalLinks, p.OutgoingLinks, p.Error, []));
         foreach (var p in pages.Where(p => p.ParentPageId is not null))
         {
             if (nodes.TryGetValue(p.ParentPageId!.Value, out var parent))
@@ -240,6 +251,6 @@ public static class JobEndpoints
     {
         int Of(PageStatus s) => counts.GetValueOrDefault(s);
         var progress = new JobProgress(job.PagesDiscovered, Of(PageStatus.Fetched), Of(PageStatus.Failed), Of(PageStatus.Skipped), Of(PageStatus.Queued));
-        return new JobSummary(job.Id, job.InputUrl, StatusText.Of(job.Status), job.MaxDepth, job.MaxPages, job.CreatedAt, job.StartedAt, job.CompletedAt, job.FailureReason, progress);
+        return new JobSummary(job.Id, job.InputUrl, job.Status.ToString(), job.MaxDepth, job.MaxPages, job.CreatedAt, job.StartedAt, job.CompletedAt, job.FailureReason, progress);
     }
 }

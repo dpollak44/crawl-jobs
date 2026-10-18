@@ -1,6 +1,7 @@
 using System.Text.Json;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using RabbitMQ.Client.Exceptions;
 
 namespace Crawler.Infrastructure.Messaging;
 
@@ -31,7 +32,16 @@ public sealed class RabbitPagePublisher(RabbitConnection connection) : IPagePubl
             returned = ea;
             return Task.CompletedTask;
         };
-        await channel.BasicPublishAsync(exchange, RabbitTopology.RoutingKey, mandatory: true, basicProperties: props, body: body, cancellationToken: ct);
+        try
+        {
+            await channel.BasicPublishAsync(exchange, RabbitTopology.RoutingKey, mandatory: true, basicProperties: props, body: body, cancellationToken: ct);
+        }
+        catch (PublishException ex) when (ex.IsReturn)
+        {
+            // Newer client versions raise the return as an exception instead of (or as well as) the event.
+            throw new UnroutableMessageException(exchange, RabbitTopology.RoutingKey, 312, ex.Message);
+        }
+
         if (returned is { } r)
         {
             throw new UnroutableMessageException(exchange, RabbitTopology.RoutingKey, r.ReplyCode, r.ReplyText);

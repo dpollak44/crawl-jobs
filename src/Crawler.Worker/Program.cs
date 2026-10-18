@@ -22,6 +22,7 @@ builder.Services.AddHttpClient<PageFetcher>(c =>
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
     {
         AllowAutoRedirect = false, // PageFetcher follows redirects itself: same-host http/https hops allowed, final URL recorded, hops capped
+        UseProxy = false,          // a proxy would fetch on our behalf and bypass the connect-time address guard
         ConnectCallback = GuardedConnect.ConnectAsync, // never dial a private or internal address, whatever a name resolves to
         PooledConnectionLifetime = TimeSpan.FromMinutes(2),
     })

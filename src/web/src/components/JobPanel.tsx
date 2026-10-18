@@ -1,33 +1,34 @@
 import { useState } from "react";
+import { ErrorText } from "./ErrorText";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
-import { isSettled, isTerminal } from "../api/types";
+import { isSettled, isTerminal, handledCount } from "../api/types";
 import { useJob } from "../hooks/useJob";
 import { useTree } from "../hooks/useTree";
 import { StatusBadge } from "./StatusBadge";
 import { PageTree } from "./PageTree";
 import { duration, formatDateTime, hostOf } from "../lib/format";
-import { useState as useCopiedState } from "react";
 
 interface Props {
     jobId: string;
-    onChanged: () => void; // tell the history list to refresh (e.g. after cancel)
 }
 
 /** One job: status, timings, live progress, and the page tree once it is final. */
-export function JobPanel({ jobId, onChanged }: Props) {
-    const { job, setJob, error, setError, mode } = useJob(jobId);
-    const { tree, error: treeError, loading: treeLoading } = useTree(job);
+export function JobPanel({ jobId }: Props) {
+    const { job, setJob, error, mode } = useJob(jobId);
+    const { tree, error: treeError, retry: retryTree, loading: treeLoading } = useTree(job);
     const [canceling, setCanceling] = useState(false);
-    const [copied, setCopied] = useCopiedState(false);
+    // Kept apart from the stream's error: the next live update must not wipe out "could not cancel".
+    const [cancelError, setCancelError] = useState<string | null>(null);
+    const [copied, setCopied] = useState(false);
 
     async function onCancel() {
         setCanceling(true);
+        setCancelError(null);
         try {
             setJob(await api.cancel(jobId));
-            onChanged();
         } catch (err) {
-            setError(errorMessage(err, "Could not cancel."));
+            setCancelError(errorMessage(err, "Could not cancel."));
         } finally {
             setCanceling(false);
         }
@@ -42,14 +43,13 @@ export function JobPanel({ jobId, onChanged }: Props) {
     if (!job)
         return (
             <div className="card panel empty-panel">
-                <p className="error" role="alert">{error}</p>
+                <ErrorText>{error}</ErrorText>
                 <p className="muted small">The address may belong to a job that no longer exists.</p>
                 <Link className="button-link" to="/">Show the latest crawl</Link>
             </div>
         );
 
-    const done =
-        job.progress.fetched + job.progress.failed + job.progress.skipped;
+    const done = handledCount(job.progress);
     const settled = isSettled(job);
     const took = duration(job.startedAt, job.completedAt);
 
@@ -95,7 +95,7 @@ export function JobPanel({ jobId, onChanged }: Props) {
                     <dt>Job id</dt>
                     <dd>
                         <code className="job-id">{job.jobId}</code>{" "}
-                        <button className="ghost tiny" onClick={copyId} aria-label="Copy job id">{copied ? "Copied" : "Copy"}</button>
+                        <button className="ghost tiny" onClick={copyId} aria-label="Copy job id" aria-live="polite">{copied ? "Copied" : "Copy"}</button>
                     </dd>
                 </div>
                 <div><dt>Depth</dt><dd>{job.maxDepth}</dd></div>
@@ -142,19 +142,19 @@ export function JobPanel({ jobId, onChanged }: Props) {
             </div>
 
             {job.failureReason && (
-                <p className="error" role="alert">
-                    {job.failureReason}
-                </p>
+                <ErrorText>{job.failureReason}</ErrorText>
             )}
             {error && (
-                <p className="error" role="alert">
-                    {error}
-                </p>
+                <ErrorText>{error}</ErrorText>
+            )}
+            {cancelError && (
+                <ErrorText>{cancelError}</ErrorText>
             )}
             {treeError && (
-                <p className="error" role="alert">
-                    {treeError}
-                </p>
+                <ErrorText>{treeError}{" "}
+                    <button className="ghost tiny" onClick={retryTree}>
+                        Retry
+                    </button></ErrorText>
             )}
             {treeLoading && <p className="muted">Loading results…</p>}
             {tree && <PageTree root={tree} host={hostOf(job.url)} />}

@@ -1,4 +1,5 @@
-import type { JobSummary, Page } from "../api/types";
+import { handledCount, type JobSummary, type Page } from "../api/types";
+import { ErrorText } from "./ErrorText";
 import { StatusBadge } from "./StatusBadge";
 import { formatShort, hostOf } from "../lib/format";
 
@@ -6,34 +7,32 @@ interface Props {
     data: Page<JobSummary> | null;
     loading: boolean;
     error: string | null;
-    selectedId: string | null;
     page: number; // requested
     shownPage: number; // what the rows on screen belong to
     pages: number;
     onSelect: (jobId: string) => void;
     onPage: (page: number) => void;
+    onRetry: () => void; // ask again for `page` after an error
 }
 
 export function HistoryTable({
     data,
     loading,
     error,
-    selectedId,
     page,
     shownPage,
     pages,
     onSelect,
     onPage,
+    onRetry,
 }: Props) {
     if (loading && !data) return <p className="muted">Loading jobs…</p>;
     if (error && !data) {
         return (
-            <p className="error" role="alert">
-                {error}{" "}
-                <button className="ghost tiny" onClick={() => onPage(page)}>
+            <ErrorText>{error}{" "}
+                <button className="ghost tiny" onClick={onRetry}>
                     Retry
-                </button>
-            </p>
+                </button></ErrorText>
         );
     }
     if (!data) return null;
@@ -46,12 +45,10 @@ export function HistoryTable({
     return (
         <div className="history">
             {error && (
-                <p className="error" role="alert">
-                    {error}{" "}
-                    <button className="ghost tiny" onClick={() => onPage(page)}>
+                <ErrorText>{error}{" "}
+                    <button className="ghost tiny" onClick={onRetry}>
                         Retry
-                    </button>
-                </p>
+                    </button></ErrorText>
             )}
             {switching && <p className="muted small">Loading page {page}…</p>}
             {data.items.length === 0 ? (
@@ -66,30 +63,21 @@ export function HistoryTable({
                                 <th>Site</th>
                                 <th>Status</th>
                                 <th className="num">Pages</th>
-                                <th>Started</th>
+                                <th>Created</th>
                             </tr>
                         </thead>
                         <tbody>
                             {data.items.map((j) => {
-                                const done =
-                                    j.progress.fetched +
-                                    j.progress.failed +
-                                    j.progress.skipped;
+                                const done = handledCount(j.progress);
                                 return (
                                     <tr
                                         key={j.jobId}
-                                        className={
-                                            j.jobId === selectedId
-                                                ? "selected"
-                                                : undefined
-                                        }
                                         onClick={() => onSelect(j.jobId)}
                                         tabIndex={0}
                                         onKeyDown={(e) => {
                                             if (e.key === "Enter")
                                                 onSelect(j.jobId);
                                         }}
-                                        aria-selected={j.jobId === selectedId}
                                     >
                                         <td>
                                             <div className="site">

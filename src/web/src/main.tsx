@@ -18,7 +18,6 @@ function App() {
             </header>
             <Routes>
                 <Route path="/" element={<JobsPage />} />
-                <Route path="/history" element={<JobsPage />} />
                 <Route path="/jobs/:jobId" element={<JobPage />} />
             </Routes>
         </BrowserRouter>

@@ -6,6 +6,7 @@ import { isSettled, type JobSummary, type TreeNode } from "../api/types";
 export function useTree(job: JobSummary | null) {
     const [tree, setTree] = useState<TreeNode | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [attempt, setAttempt] = useState(0);
     const jobId = job?.jobId ?? null;
     const ready =
         job !== null &&
@@ -31,7 +32,11 @@ export function useTree(job: JobSummary | null) {
         return () => {
             stale = true;
         };
-    }, [jobId, ready]);
+    }, [jobId, ready, attempt]);
 
-    return { tree, error, loading: ready && tree === null && error === null };
+    const retry = () => {
+        setError(null);
+        setAttempt((a) => a + 1);
+    };
+    return { tree, error, retry, loading: ready && tree === null && error === null };
 }

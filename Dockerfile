@@ -22,4 +22,4 @@ WORKDIR /app
 COPY --from=build /app .
 USER $APP_UID
 ENV PROJECT_DLL=${PROJECT}.dll
-ENTRYPOINT ["sh", "-c", "dotnet $PROJECT_DLL"]
+ENTRYPOINT ["sh", "-c", "exec dotnet $PROJECT_DLL"]

@@ -7,9 +7,9 @@ public static class Paging
 {
     public static (int Skip, int Take, int PageNumber) Resolve(int? page, int? pageSize, IConfiguration config)
     {
-        var max = config.GetValue("Paging:MaxPageSize", 200);
-        var size = Math.Clamp(pageSize ?? config.GetValue("Paging:DefaultPageSize", 50), 1, max);
-        var number = Math.Max(page ?? 1, 1);
+        var max = config.GetValue("Paging:MaxPageSize", 100);
+        var size = Math.Clamp(pageSize ?? config.GetValue("Paging:DefaultPageSize", 20), 1, max);
+        var number = Math.Clamp(page ?? 1, 1, int.MaxValue / max); // (number - 1) * size can never overflow
         return ((number - 1) * size, size, number);
     }
 }

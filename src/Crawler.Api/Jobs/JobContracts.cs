@@ -1,3 +1,4 @@
+using Crawler.Domain.Crawling;
 using Crawler.Domain.Model;
 using FluentValidation;
 
@@ -42,14 +43,14 @@ public sealed class CreateJobRequestValidator : AbstractValidator<CreateJobReque
     {
         RuleFor(x => x.Url)
             .NotEmpty().WithMessage("Enter the address of the page to start from.")
-            .MaximumLength(Crawler.Domain.Crawling.UrlNormalizer.MaxLength).WithMessage("That address is too long to crawl (limit 2,048 characters).");
+            .MaximumLength(UrlNormalizer.MaxLength).WithMessage("That address is too long to crawl (limit 2,048 characters).");
         RuleFor(x => x.UrlWithScheme)
-            .Must(u => Uri.TryCreate(u, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" && LooksLikeHost(uri))
+            .Must(u => TryParseWebAddress(u, out _))
             .When(x => !string.IsNullOrWhiteSpace(x.Url))
             .OverridePropertyName("Url")
             .WithMessage("That does not look like a website address. Try something like example.com or https://example.com/page.");
         RuleFor(x => x.UrlWithScheme)
-            .Must(u => !Uri.TryCreate(u, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || !LooksLikeHost(uri) || Crawler.Domain.Crawling.AddressGuard.IsPublicWebAddress(uri)) // only when the shape rule above passed
+            .Must(u => !TryParseWebAddress(u, out var uri) || AddressGuard.IsPublicWebAddress(uri)) // only once the shape rule above passed
             .When(x => !string.IsNullOrWhiteSpace(x.Url))
             .OverridePropertyName("Url")
             .WithMessage("Only public websites can be crawled; private or internal addresses are refused.");
@@ -59,12 +60,21 @@ public sealed class CreateJobRequestValidator : AbstractValidator<CreateJobReque
             .WithMessage($"Page limit must be between 1 and {maxPagesLimit}.");
     }
 
-    /// <summary>A dotted name or an IP literal. Bare words ("localhost", "intranet") are not website addresses.</summary>
-    private static bool LooksLikeHost(Uri uri) => uri.Host.Contains('.') || System.Net.IPAddress.TryParse(uri.Host.Trim('[', ']'), out _);
-}
+    /// <summary>Parses an http(s) address whose host is a dotted name or an IP literal. Bare words ("localhost", "intranet") are not website addresses.</summary>
+    private static bool TryParseWebAddress(string? text, out Uri uri)
+    {
+        uri = null!;
+        if (!Uri.TryCreate(text, UriKind.Absolute, out var parsed) || parsed.Scheme is not ("http" or "https"))
+        {
+            return false;
+        }
 
-public static class StatusText
-{
-    public static string Of(JobStatus s) => s.ToString();
-    public static string Of(PageStatus s) => s.ToString();
+        if (!parsed.Host.Contains('.') && AddressGuard.TryParseIpLiteral(parsed.Host) is null)
+        {
+            return false;
+        }
+
+        uri = parsed;
+        return true;
+    }
 }

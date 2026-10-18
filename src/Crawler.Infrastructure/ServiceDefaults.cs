@@ -20,7 +20,7 @@ public static class ServiceDefaults
     {
         if (!builder.Environment.IsDevelopment())
         {
-            builder.Logging.ClearProviders().AddJsonConsole();
+            builder.Logging.ClearProviders().AddJsonConsole(o => o.IncludeScopes = true); // JobId / PageId / Attempt on every worker line
         }
 
         var connectionString = builder.Configuration.GetConnectionString("Default") ?? "Data Source=crawler.db";

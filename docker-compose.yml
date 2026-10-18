@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: crawler
       POSTGRES_DB: crawler
     ports:
-      - "5433:5432"   # host port 5433: this machine already has a Postgres on 5432
+      - "127.0.0.1:5433:5432"   # local only; host port 5433 because a developer machine may already have a Postgres on 5432
     volumes:
       - dbdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,8 +22,8 @@ services:
     restart: unless-stopped
     image: rabbitmq:3.13-management-alpine
     ports:
-      - "5672:5672"
-      - "15672:15672"   # management UI: http://localhost:15672 (guest/guest) — watch the queues and the dead-letter box
+      - "127.0.0.1:5672:5672"     # local only: the default guest/guest login is for this machine, never a network
+      - "127.0.0.1:15672:15672"   # management UI: http://localhost:15672 (guest/guest), the queues and the dead-letter box
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
       interval: 5s
@@ -43,7 +43,7 @@ services:
       RabbitMq__Host: broker
       Cors__Origins__0: http://localhost:3000
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"   # local only: the API has no login by design
     depends_on:
       db:
         condition: service_healthy
@@ -85,9 +85,10 @@ services:
       args:
         VITE_API_URL: http://localhost:8080
     ports:
-      - "3000:80"
+      - "127.0.0.1:3000:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   dbdata:

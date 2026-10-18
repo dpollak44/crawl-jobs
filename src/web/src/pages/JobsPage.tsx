@@ -39,12 +39,12 @@ export function JobsPage() {
                 data={history.data}
                 loading={history.loading}
                 error={history.error}
-                selectedId={null}
                 page={history.page}
                 shownPage={history.shownPage}
                 pages={history.pages}
                 onSelect={(id) => navigate(`/jobs/${id}`)}
                 onPage={history.setPage}
+                onRetry={history.refresh}
             />
         </div>
     );

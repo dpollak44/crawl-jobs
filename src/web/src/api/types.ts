@@ -50,3 +50,6 @@ export const isTerminal = (s: JobStatus): boolean =>
 /** A job is settled when it has a final status and no page is still waiting: only then is the tree final. */
 export const isSettled = (j: JobSummary): boolean =>
     isTerminal(j.status) && j.progress.queued === 0;
+
+/** Pages the worker has dealt with, one way or another: fetched, failed or skipped. */
+export const handledCount = (p: JobProgress): number => p.fetched + p.failed + p.skipped;

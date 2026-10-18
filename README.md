@@ -17,11 +17,15 @@ docker compose up --build
 | What                                | Where                                                                                               |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------- |
 | UI                                  | http://localhost:3000                                                                               |
-| API + interactive docs              | http://localhost:8080/swagger                                                                       |
+| API + interactive docs (Swagger)    | http://localhost:8080/swagger (on in every environment; see "Key decisions")                        |
 | API health (checks DB and broker)   | http://localhost:8080/health                                                                        |
 | Worker health                       | shown by `docker compose ps` (checked inside the container; no host port, so workers can be scaled) |
 | RabbitMQ management (guest / guest) | http://localhost:15672                                                                              |
 | Postgres                            | localhost:5433 (crawler / crawler)                                                                  |
+
+Every port above is bound to `127.0.0.1` only, and the broker and database keep their default logins: these are
+local development credentials for a laptop, stated here on purpose. Anything beyond a laptop gets secrets from the
+platform (Key Vault / an environment file that is not committed) and no published broker or database ports.
 
 Try it: type `quotes.toscrape.com` into the UI with depth 1 (no scheme needed; https is assumed). It finishes
 in about ten seconds. More workers: `docker compose up --scale worker=3`; nothing else changes (see "Scaling").
@@ -124,7 +128,8 @@ mode without a reload. A production gateway must not buffer this endpoint (the r
   `Crawl:IncludeSubdomains` flips that. A same-site link spelled with the other scheme is rewritten to the job's
   own scheme before it becomes a page, so one page is one row; the edge keeps the link as written.
 - **Depth**: the starting page is depth 0; default max depth 2 fetches three levels.
-- **Links counted** for the ratio: every `<a href>`, normalized, de-duplicated; `mailto:` / `tel:` /
+- **Links counted** for the ratio: every `<a href>`, normalized, de-duplicated, including links to private or
+  internal addresses (they are counted like any other link, only never fetched); `mailto:` / `tel:` /
   `javascript:` ignored; links to the page itself ignored. Every outgoing link is stored as an edge,
   including off-site ones, so a ratio can be audited.
 - **Links followed**: only same-site links, within depth, under the page cap. Off-site pages are counted,
@@ -176,6 +181,10 @@ real, and the idempotency requirement means something.
 - The worker checks the page's status first. If it is no longer `Queued`, the message is a duplicate: the
   page is not fetched again, no rows are written, and the worker only re-publishes any of that page's
   children that are still `Queued`. Then it acks.
+- The page's status is a concurrency token as well as the job's. If two copies of one message are processed
+  at the same moment (a sweeper re-send racing the original), both may download, but only the first save
+  wins; the second is refused by the database, its message is retried, and the retry finds the page no
+  longer `Queued` and acks. One result per page, always.
 - Page, edges and newly discovered child rows are written in **one transaction**; child messages are
   published only after it commits, so a message can never refer to a page that is not there yet.
 - Two workers discovering the same child in the same instant: the unique index rejects the second insert;
@@ -183,9 +192,10 @@ real, and the idempotency requirement means something.
   re-downloading the page or spending an attempt.
 - **Sweeper.** A worker that dies after committing a page but before publishing its children would leave
   those children `Queued` with no message in flight. Every 60 s each worker re-publishes any page that has
-  had no message sent for more than 300 s on a job that is still running, stamping the page first so two
-  workers sweeping at once do not both re-send it. A page that was merely slow gets one duplicate message,
-  which is ignored by design. Test:
+  had no message sent for more than 300 s on a job that is still running, claiming each page with a
+  conditional stamp first and re-sending only the pages it claimed, so two workers sweeping at once do not
+  both re-send the same page. A page that was merely slow gets one duplicate message, which is ignored by
+  design. Test:
   `PageProcessorTests.The_sweeper_republishes_pages_left_queued_too_long_on_running_jobs_only`.
 - The page cap is a counter on the job row raised only by one conditional `UPDATE … SET PagesDiscovered =
 PagesDiscovered + n WHERE PagesDiscovered + n <= MaxPages`, inside the same transaction as the new rows, so
@@ -202,6 +212,11 @@ Tests: `PageProcessorTests.Delivering_the_same_message_twice_creates_no_duplicat
 `RoutingTests.An_infrastructure_outage_waits_without_spending_an_attempt_however_many_times`.
 
 ### Retry policy
+
+A deliberate limit: retries cover connecting, the headers and the status line. A body that stalls after the
+headers arrived is not retried; the page is recorded `Failed` with that reason. A server that sends headers and
+then hangs is usually doing it on purpose or is overloaded, and re-reading a 2 MB body three times would hold
+a worker slot for most of a minute for little gain.
 
 Two different failures, handled differently:
 
@@ -297,6 +312,11 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
 
 ## Key decisions
 
+- **Swagger is on in every environment**, not only in Development. The API has no login and is meant to be
+  read by people as well as by the UI; hiding its documentation in production would protect nothing (the
+  routes are the same) and cost the operator the one page that shows what the service does. Once the API has
+  authentication, the docs sit behind it like everything else.
+
 - **RabbitMQ over Kafka.** Both were offered. RabbitMQ has native dead-lettering and TTL-based retry, so the
   brief's requirements map onto it directly with no extra code; Kafka would have meant building both.
 - **The UI served from its own container, not by the API.** Static files belong at the edge, close to the
@@ -348,6 +368,14 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
   indexes already make that safe, and three workers did 120 pages in 12 s.
 - Operational alerts with concrete triggers: the dead-letter queue not empty, a job `Running` past its
   expected time, the Error log line.
+- A central logging service next to those alerts: Application Insights / Azure Monitor on Azure, or Seq / ELK
+  elsewhere. The logs are already structured JSON with `JobId`, `PageId` and `Attempt` on every line, so this
+  is a sink and a dashboard, not a code change; today the logs are read with `docker compose logs`.
+- Fewer broker round trips: today every publish opens its own confirmed channel and a page's children are
+  published one at a time. A long-lived confirm channel per consumer slot, and children published as a
+  batch before awaiting the confirms, would cut the per-page cost on link-heavy sites.
+- An explicit in-progress page state (`Queued` → `Fetching`) claimed before the download, so a re-sent page
+  is never downloaded twice even in a race; today the second download is discarded at save time.
 - Scheduled reprocessing of the dead-letter queue with a cap.
 - Politeness: robots.txt, a per-host delay, a shared rate limit across workers; then proxy rotation for sites
   that block a single address, after politeness, not before.

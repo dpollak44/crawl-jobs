@@ -70,7 +70,7 @@ public sealed class CrawlJob
 
     public Result MarkCompleted(DateTimeOffset now)
     {
-        if (Status is JobStatus.Completed or JobStatus.Failed or JobStatus.Canceled)
+        if (IsTerminal)
         {
             return Result.Fail($"Job is already {Status}.");
         }
@@ -80,16 +80,18 @@ public sealed class CrawlJob
         return Result.Ok();
     }
 
+    public const int MaxReasonLength = CrawlPage.MaxErrorLength;
+
     public void MarkFailed(string reason, DateTimeOffset now)
     {
         Status = JobStatus.Failed;
-        FailureReason = reason;
+        FailureReason = CrawlPage.Truncate(reason);
         CompletedAt = now;
     }
 
     public Result Cancel(DateTimeOffset now)
     {
-        if (Status is JobStatus.Completed or JobStatus.Failed or JobStatus.Canceled)
+        if (IsTerminal)
         {
             return Result.Fail($"A {Status} job cannot be canceled.");
         }

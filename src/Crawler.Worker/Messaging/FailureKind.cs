@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using RabbitMQ.Client.Exceptions;
@@ -18,6 +19,8 @@ public static class FailureKind
         {
             switch (e)
             {
+                case PostgresException { SqlState: "40001" or "40P01" }:
+                    return false; // deadlock / serialization failure: retry, but on the attempt budget, so a recurring one is given up
                 case NpgsqlException { IsTransient: true }:
                 case SocketException:
                 case TimeoutException:
@@ -27,6 +30,22 @@ public static class FailureKind
                     return true;
                 case DbUpdateException:
                     continue; // look at what EF wrapped
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>A unique-index collision: another worker wrote the same row first. Postgres 23505; SQLite constraint error 19 (tests).</summary>
+    public static bool IsUniqueViolation(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            switch (e)
+            {
+                case PostgresException { SqlState: "23505" }:
+                case SqliteException { SqliteErrorCode: 19 }:
+                    return true;
             }
         }
 

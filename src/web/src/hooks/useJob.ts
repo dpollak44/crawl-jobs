@@ -17,7 +17,7 @@ const REOPEN_AFTER_MS = 10_000;
 export function useJob(jobId: string | null) {
     const [job, setJob] = useState<JobSummary | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [mode, setMode] = useState<UpdateMode>("live");
+    const [mode, setMode] = useState<UpdateMode>(() => (typeof EventSource === "undefined" ? "polling" : "live"));
     const lastStreamErrorAt = useRef(0);
 
     // Reset when the selected job changes.
@@ -33,8 +33,12 @@ export function useJob(jobId: string | null) {
         const source = new EventSource(api.eventsUrl(jobId));
         let finished = false;
         source.onmessage = (e) => {
-            setJob(JSON.parse(e.data) as JobSummary);
-            setError(null);
+            try {
+                setJob(JSON.parse(e.data) as JobSummary);
+                setError(null);
+            } catch {
+                /* a malformed event is skipped; the next one or the safety re-read replaces it */
+            }
         };
         source.addEventListener("done", () => {
             finished = true;
@@ -88,5 +92,5 @@ export function useJob(jobId: string | null) {
         };
     }, [jobId, mode]);
 
-    return { job, setJob, error, setError, mode };
+    return { job, setJob, error, mode };
 }

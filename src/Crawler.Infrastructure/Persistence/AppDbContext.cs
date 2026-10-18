@@ -33,7 +33,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             b.Property(j => j.InputUrl).HasMaxLength(2048).IsRequired();
             b.Property(j => j.StartHost).HasMaxLength(255).IsRequired();
             b.Property(j => j.Status).HasConversion<string>().HasMaxLength(20).IsConcurrencyToken(); // a stale copy cannot overwrite a final status
-            b.Property(j => j.FailureReason).HasMaxLength(1000);
+            b.Property(j => j.FailureReason).HasMaxLength(CrawlJob.MaxReasonLength);
             // The cap counter is only ever changed by an atomic UPDATE … WHERE PagesDiscovered + n <= MaxPages (PageProcessor),
             // never by writing back an entity, so two workers can never both slip past the cap.
             b.Property(j => j.PagesDiscovered).ValueGeneratedOnUpdate();
@@ -46,8 +46,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             b.HasKey(p => p.Id);
             b.Property(p => p.Url).HasMaxLength(2048).IsRequired();
             b.Property(p => p.FinalUrl).HasMaxLength(2048);
-            b.Property(p => p.Status).HasConversion<string>().HasMaxLength(20);
-            b.Property(p => p.Error).HasMaxLength(1000);
+            b.Property(p => p.Status).HasConversion<string>().HasMaxLength(20).IsConcurrencyToken(); // the second of two racing copies loses, never overwrites
+            b.Property(p => p.Error).HasMaxLength(CrawlPage.MaxErrorLength);
             b.Property(p => p.DomainLinkRatio).HasPrecision(5, 4);
             b.HasIndex(p => new { p.JobId, p.Url }).IsUnique();   // idempotency: one row per page per job
             b.HasIndex(p => new { p.JobId, p.Status });           // "any pages still queued?"

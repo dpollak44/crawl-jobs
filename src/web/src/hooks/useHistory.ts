@@ -23,7 +23,8 @@ export function useHistory() {
 
     useEffect(() => {
         let stale = false;
-        setLoading(true);
+        // Only a page change (or the first load) shows a loading state; the periodic refresh updates rows in place.
+        setLoading((current) => current || data === null || data.pageNumber !== page);
         api.history(page, PAGE_SIZE)
             .then((d) => {
                 if (!stale) {
@@ -41,6 +42,7 @@ export function useHistory() {
         return () => {
             stale = true;
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- `data` is read for the loading decision only
     }, [page, version]);
 
     const anyActive = data?.items.some((j) => !isTerminal(j.status)) ?? false;

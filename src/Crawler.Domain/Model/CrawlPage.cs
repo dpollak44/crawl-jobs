@@ -61,10 +61,13 @@ public sealed class CrawlPage
         FetchedAt = now;
     }
 
+    /// <summary>Column width of <see cref="Error"/>; an exception message can be longer, the saved text never is.</summary>
+    public const int MaxErrorLength = 1000;
+
     public void MarkFailed(string error, int? httpStatus, DateTimeOffset now)
     {
         Status = PageStatus.Failed;
-        Error = error;
+        Error = Truncate(error);
         HttpStatus = httpStatus;
         FetchedAt = now;
     }
@@ -73,8 +76,10 @@ public sealed class CrawlPage
     public void MarkSkipped(string reason, int? httpStatus, DateTimeOffset now)
     {
         Status = PageStatus.Skipped;
-        Error = reason;
+        Error = Truncate(reason);
         HttpStatus = httpStatus;
         FetchedAt = now;
     }
+
+    internal static string Truncate(string text) => text.Length <= MaxErrorLength ? text : text[..(MaxErrorLength - 1)] + "…";
 }

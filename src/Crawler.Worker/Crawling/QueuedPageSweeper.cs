@@ -58,16 +58,20 @@ public sealed class QueuedPageSweeper(IServiceScopeFactory scopes, IOptions<Craw
             return 0;
         }
 
-        // Stamp first, then publish: another worker sweeping at the same moment will not re-send the same pages.
-        var ids = stuck.Select(p => p.Id).ToList();
-        await db.Pages.Where(p => ids.Contains(p.Id) && p.LastQueuedAt < cutoff)
-            .ExecuteUpdateAsync(s => s.SetProperty(p => p.LastQueuedAt, now), ct);
-
+        // Claim each page with a conditional stamp and publish only the ones THIS worker claimed: two workers sweeping
+        // at the same moment read the same list, but only one of them wins each row.
+        var sent = 0;
         foreach (var page in stuck)
         {
-            await publisher.PublishAsync(new CrawlPageMessage(page.JobId, page.Id, page.Url, page.Depth), ct);
+            var claimed = await db.Pages.Where(p => p.Id == page.Id && p.LastQueuedAt < cutoff)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.LastQueuedAt, now), ct);
+            if (claimed == 1)
+            {
+                await publisher.PublishAsync(new CrawlPageMessage(page.JobId, page.Id, page.Url, page.Depth), ct);
+                sent++;
+            }
         }
 
-        return stuck.Count;
+        return sent;
     }
 }

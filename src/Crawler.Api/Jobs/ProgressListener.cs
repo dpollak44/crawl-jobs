@@ -14,12 +14,11 @@ public sealed class ProgressListener(RabbitConnection connection, ProgressRelay 
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var delay = TimeSpan.FromSeconds(1);
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                var conn = await connection.GetAsync(stoppingToken);
+                var conn = await connection.GetWithPatienceAsync(logger, stoppingToken);
                 await using var channel = await conn.CreateChannelAsync(cancellationToken: stoppingToken);
                 var queue = await channel.QueueDeclareAsync(queue: string.Empty, durable: false, exclusive: true, autoDelete: true, cancellationToken: stoppingToken);
                 await channel.QueueBindAsync(queue.QueueName, RabbitTopology.ProgressExchange, string.Empty, cancellationToken: stoppingToken);
@@ -27,15 +26,23 @@ public sealed class ProgressListener(RabbitConnection connection, ProgressRelay 
                 var consumer = new AsyncEventingBasicConsumer(channel);
                 consumer.ReceivedAsync += async (_, ea) =>
                 {
-                    if (Guid.TryParse(Encoding.UTF8.GetString(ea.Body.Span), out var jobId))
+                    if (!Guid.TryParse(Encoding.UTF8.GetString(ea.Body.Span), out var jobId))
+                    {
+                        return;
+                    }
+
+                    try
                     {
                         var pushed = await relay.NotifyAsync(jobId, stoppingToken);
                         logger.LogDebug("Progress notification for job {JobId}: {Outcome}", jobId, pushed ? "pushed to open streams" : "no listeners");
                     }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger.LogWarning(ex, "Could not relay progress for job {JobId}; open streams fall back to their safety re-read", jobId);
+                    }
                 };
                 await channel.BasicConsumeAsync(queue.QueueName, autoAck: true, consumer, stoppingToken);
                 logger.LogInformation("Relaying progress notifications from {Exchange} via {Queue}", RabbitTopology.ProgressExchange, queue.QueueName);
-                delay = TimeSpan.FromSeconds(1);
 
                 await Task.Delay(Timeout.Infinite, stoppingToken).ContinueWith(_ => { }, TaskScheduler.Default);
             }
@@ -45,9 +52,8 @@ public sealed class ProgressListener(RabbitConnection connection, ProgressRelay 
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Progress listener lost the broker; retrying in {Delay}s (streams keep their safety re-read)", delay.TotalSeconds);
-                await Task.Delay(delay, stoppingToken);
-                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 15));
+                logger.LogWarning(ex, "Progress listener lost the broker; reconnecting (streams keep their safety re-read)");
+                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken); // GetWithPatienceAsync backs off from here
             }
         }
     }

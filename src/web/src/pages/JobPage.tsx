@@ -9,7 +9,7 @@ export function JobPage() {
             <p className="back">
                 <Link to="/">← All crawls</Link>
             </p>
-            <JobPanel key={jobId} jobId={jobId} onChanged={() => undefined} />
+            <JobPanel key={jobId} jobId={jobId} />
         </div>
     );
 }

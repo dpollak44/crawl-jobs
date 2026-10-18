@@ -4,7 +4,7 @@ ARG VITE_API_URL=http://localhost:8080
 ENV VITE_API_URL=$VITE_API_URL
 WORKDIR /web
 COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build
 

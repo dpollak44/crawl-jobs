@@ -1,4 +1,5 @@
 import { type FormEvent, useState } from "react";
+import { ErrorText } from "./ErrorText";
 import { api, errorMessage } from "../api/client";
 
 interface Props {
@@ -79,9 +80,7 @@ export function StartCrawlForm({ onStarted, onClose }: Props) {
                 </span>
             </div>
             {error && (
-                <p className="error" role="alert">
-                    {error}
-                </p>
+                <ErrorText>{error}</ErrorText>
             )}
         </form>
     );

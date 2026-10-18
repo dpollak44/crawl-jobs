@@ -21,9 +21,44 @@ public sealed class RabbitConsumer(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var conn = await ConnectWithPatienceAsync(stoppingToken);
+        // Consume until the channel dies (the broker can close a channel on its own, e.g. a stale ack after a
+        // recovery), then rebuild it; a dead channel must never leave a healthy-looking worker that consumes nothing.
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await ConsumeUntilChannelClosesAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Consumer channel lost; rebuilding");
+                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+            }
+        }
+    }
+
+    private async Task ConsumeUntilChannelClosesAsync(CancellationToken stoppingToken)
+    {
+        var conn = await connection.GetWithPatienceAsync(logger, stoppingToken);
         await using var channel = await conn.CreateChannelAsync(cancellationToken: stoppingToken);
         await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: connection.Options.Prefetch, global: false, stoppingToken);
+
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.ChannelShutdownAsync += (_, args) =>
+        {
+            closed.TrySetResult();
+            logger.LogWarning("Consumer channel shut down: {Reason}", args.ReplyText);
+            return Task.CompletedTask;
+        };
+        channel.CallbackExceptionAsync += (_, args) =>
+        {
+            logger.LogError(args.Exception, "Unhandled exception inside a message callback");
+            return Task.CompletedTask;
+        };
 
         var consumer = new AsyncEventingBasicConsumer(channel);
         consumer.ReceivedAsync += async (_, ea) =>
@@ -72,51 +107,76 @@ public sealed class RabbitConsumer(
                 result = new ProcessResult(ProcessOutcome.Transient, ex.Message);
             }
 
-            switch (ConsumerRouting.Decide(result, message, connection.Options.MaxAttempts))
+            try
             {
-                case RouteAction.Ack:
-                    await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
-                    break;
-
-                case RouteAction.RetrySameAttempt:
-                    // Wait out the outage at the retry cadence without spending an attempt. If the broker itself is
-                    // down the republish throws; then hand the message back to the queue unacked instead.
-                    try
-                    {
-                        await publisher.PublishAsync(RabbitTopology.RetryExchange, message, stoppingToken);
-                        await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        logger.LogWarning(ex, "Broker unavailable too; returning page {PageId} to the queue", message.PageId);
-                        await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: true, CancellationToken.None);
-                    }
-
-                    break;
-
-                case RouteAction.RetryNextAttempt:
-                    logger.LogWarning("Transient failure on attempt {Attempt}: {Reason}; retrying in {Delay} ms", message.Attempt, result.Reason, connection.Options.RetryDelayMs);
-                    await publisher.PublishAsync(RabbitTopology.RetryExchange, message with { Attempt = message.Attempt + 1 }, stoppingToken);
-                    await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
-                    break;
-
-                case RouteAction.GiveUpAndDeadLetter:
-                    logger.LogError("Giving up on page {PageId} after {Attempt} attempts: {Reason}; dead-lettering", message.PageId, message.Attempt, result.Reason);
-                    await GiveUpAsync(message, result.Reason ?? "unknown", stoppingToken);
-                    await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, stoppingToken);
-                    break;
-
-                case RouteAction.DeadLetter:
-                    logger.LogError("Poison message for page {PageId}: {Reason}; dead-lettering", message.PageId, result.Reason);
-                    await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, stoppingToken);
-                    break;
+                await RouteAsync(channel, deliveryTag, message, result, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: true, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                // Routing itself failed (broker gone mid-ack, republish refused): say so, and hand the message back.
+                logger.LogError(ex, "Could not route the outcome of page {PageId}; returning it to the queue", message.PageId);
+                try
+                {
+                    await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: true, CancellationToken.None);
+                }
+                catch (Exception nackEx)
+                {
+                    logger.LogError(nackEx, "Could not return page {PageId} to the queue either; the broker will redeliver it when the channel closes", message.PageId);
+                }
             }
         };
 
         await channel.BasicConsumeAsync(RabbitTopology.WorkQueue, autoAck: false, consumer, stoppingToken);
         logger.LogInformation("Worker consuming {Queue} (prefetch {Prefetch})", RabbitTopology.WorkQueue, connection.Options.Prefetch);
 
-        await Task.Delay(Timeout.Infinite, stoppingToken).ContinueWith(_ => { }, TaskScheduler.Default);
+        await closed.Task.WaitAsync(stoppingToken);
+    }
+
+    private async Task RouteAsync(IChannel channel, ulong deliveryTag, CrawlPageMessage message, ProcessResult result, CancellationToken stoppingToken)
+    {
+        switch (ConsumerRouting.Decide(result, message, connection.Options.MaxAttempts))
+        {
+            case RouteAction.Ack:
+                await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
+                break;
+
+            case RouteAction.RetrySameAttempt:
+                // Wait out the outage at the retry cadence without spending an attempt. If the broker itself is
+                // down the republish throws; then hand the message back to the queue unacked instead.
+                try
+                {
+                    await publisher.PublishAsync(RabbitTopology.RetryExchange, message, stoppingToken);
+                    await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Broker unavailable too; returning page {PageId} to the queue", message.PageId);
+                    await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: true, CancellationToken.None);
+                }
+
+                break;
+
+            case RouteAction.RetryNextAttempt:
+                logger.LogWarning("Transient failure on attempt {Attempt}: {Reason}; retrying in {Delay} ms", message.Attempt, result.Reason, connection.Options.RetryDelayMs);
+                await publisher.PublishAsync(RabbitTopology.RetryExchange, message with { Attempt = message.Attempt + 1 }, stoppingToken);
+                await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
+                break;
+
+            case RouteAction.GiveUpAndDeadLetter:
+                logger.LogError("Giving up on page {PageId} after {Attempt} attempts: {Reason}; dead-lettering", message.PageId, message.Attempt, result.Reason);
+                await GiveUpAsync(message, result.Reason ?? "unknown", stoppingToken);
+                await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, stoppingToken);
+                break;
+
+            case RouteAction.DeadLetter:
+                logger.LogError("Poison message for page {PageId}: {Reason}; dead-lettering", message.PageId, result.Reason);
+                await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, stoppingToken);
+                break;
+        }
     }
 
     /// <summary>Record the give-up on the page so the job can still complete; the message itself goes to the DLQ.</summary>
@@ -130,25 +190,6 @@ public sealed class RabbitConsumer(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "Could not record the give-up for page {PageId}; the sweeper will re-send it once the database is back", message.PageId);
-        }
-    }
-
-    /// <summary>The broker may still be starting when the worker does. Wait for it rather than crash-loop.</summary>
-    private async Task<IConnection> ConnectWithPatienceAsync(CancellationToken ct)
-    {
-        var delay = TimeSpan.FromSeconds(1);
-        while (true)
-        {
-            try
-            {
-                return await connection.GetAsync(ct);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogWarning("Broker not reachable yet ({Error}); retrying in {Delay}s", ex.Message, delay.TotalSeconds);
-                await Task.Delay(delay, ct);
-                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 15));
-            }
         }
     }
 }

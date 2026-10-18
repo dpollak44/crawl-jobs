@@ -22,6 +22,16 @@ public class AddressGuardTests
     [InlineData("http://192.168.1.1/", false)]
     [InlineData("http://169.254.169.254/latest/meta-data", false)]
     [InlineData("http://100.64.0.1/", false)]            // carrier-grade NAT
+    [InlineData("http://224.0.0.1/", false)]             // multicast
+    [InlineData("http://255.255.255.255/", false)]       // broadcast / reserved 240/4
+    [InlineData("http://198.18.0.1/", false)]            // benchmarking range
+    [InlineData("http://192.0.0.1/", false)]             // IETF protocol assignments
+    [InlineData("http://198.20.0.1/", true)]             // just outside 198.18/15
+    [InlineData("http://[ff02::1]/", false)]             // IPv6 multicast
+    [InlineData("http://[2002:7f00:1::1]/", false)]      // 6to4 carrying 127.0.0.1
+    [InlineData("http://[2002:808:808::1]/", true)]      // 6to4 carrying 8.8.8.8
+    [InlineData("http://[64:ff9b::a00:1]/", false)]      // NAT64 carrying 10.0.0.1
+    [InlineData("http://[::a9fe:a9fe]/", false)]         // IPv4-compatible carrying 169.254.169.254
     [InlineData("http://[::1]/", false)]
     [InlineData("http://[fe80::1]/", false)]
     [InlineData("http://[fd00::1]/", false)]
