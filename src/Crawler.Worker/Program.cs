@@ -31,6 +31,7 @@ builder.Services.AddHttpClient<PageFetcher>(c =>
 
 builder.Services.AddScoped<PageProcessor>();
 builder.Services.AddHostedService<RabbitConsumer>();
+builder.Services.AddHostedService<QueuedPageSweeper>();
 
 var app = builder.Build();
 app.MapHealthChecks("/health");

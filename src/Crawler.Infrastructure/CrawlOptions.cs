@@ -14,4 +14,10 @@ public sealed class CrawlOptions
     public int FetchRetries { get; set; } = 2;
     public int MaxRedirects { get; set; } = 5;
     public long MaxBodyBytes { get; set; } = 2 * 1024 * 1024;
+
+    /// <summary>How often the worker looks for pages left Queued with no message in flight.</summary>
+    public int SweepIntervalSeconds { get; set; } = 60;
+
+    /// <summary>A Queued page older than this on a running job is assumed to have lost its message and is re-published.</summary>
+    public int StuckAfterSeconds { get; set; } = 120;
 }

@@ -216,6 +216,47 @@ public class PageProcessorTests : IDisposable
     }
 
     [Fact]
+    public async Task The_sweeper_republishes_pages_left_queued_too_long_on_running_jobs_only()
+    {
+        var (job, _) = await _h.StartJobAsync("https://shop.test/", maxDepth: 1);
+        await _h.ProcessAsync(_h.Queue.Pending.Dequeue()); // seed fetched; 4 children Queued, 4 messages pending
+        var (doneJob, _) = await _h.StartJobAsync("https://shop.test/team");
+        await _h.DrainAsync();                              // second job completes; first job's children were drained too
+        _h.Queue.AllPublished.Clear();
+
+        // Pretend the first job's children never got their messages: put two of them back to Queued, one old, one fresh.
+        Guid oldPage, freshPage;
+        await using (var db = _h.Db())
+        {
+            var children = await db.Pages.Where(p => p.JobId == job.Id && p.Depth == 1).OrderBy(p => p.Url).Take(2).ToListAsync();
+            oldPage = children[0].Id;
+            freshPage = children[1].Id;
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM links WHERE \"ParentPageId\" = {0}", oldPage); // a never-fetched page has no links yet
+            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"DiscoveredAt\" = {0} WHERE \"Id\" = {1}", (_h.Now - TimeSpan.FromMinutes(10)).UtcTicks, oldPage);
+            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"DiscoveredAt\" = {0} WHERE \"Id\" = {1}", _h.Now.UtcTicks, freshPage);
+            await db.Database.ExecuteSqlRawAsync("UPDATE jobs SET \"Status\" = 'Running' WHERE \"Id\" = {0}", job.Id);
+            // A page on a completed job must never be re-published, however old.
+            var donePage = await db.Pages.SingleAsync(p => p.JobId == doneJob.Id);
+            await db.Database.ExecuteSqlRawAsync("UPDATE pages SET \"Status\" = 'Queued', \"DiscoveredAt\" = {0} WHERE \"Id\" = {1}", (_h.Now - TimeSpan.FromMinutes(10)).UtcTicks, donePage.Id);
+        }
+
+        int republished;
+        await using (var db = _h.Db())
+        {
+            republished = await QueuedPageSweeper.SweepOnceAsync(db, _h.Queue, _h.Now, TimeSpan.FromMinutes(2), CancellationToken.None);
+        }
+
+        republished.ShouldBe(1);
+        _h.Queue.AllPublished.Single().PageId.ShouldBe(oldPage);
+
+        // And the re-published message completes the job through the normal path.
+        await _h.DrainAsync();
+        await using var check = _h.Db();
+        (await check.Pages.SingleAsync(p => p.Id == oldPage)).Status.ShouldBe(PageStatus.Fetched);
+        (await check.Pages.CountAsync(p => p.JobId == job.Id)).ShouldBe(5); // no duplicate rows
+    }
+
+    [Fact]
     public async Task A_message_for_an_unknown_job_is_poison()
     {
         var result = await _h.ProcessAsync(new CrawlPageMessage(Guid.NewGuid(), Guid.NewGuid(), "https://shop.test/", 0));
