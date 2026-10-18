@@ -188,6 +188,34 @@ public class PageProcessorTests : IDisposable
     }
 
     [Fact]
+    public async Task Giving_up_on_a_page_after_exhausted_retries_still_lets_the_job_complete()
+    {
+        var (job, _) = await _h.StartJobAsync("https://shop.test/", maxDepth: 1);
+        var seedMessage = _h.Queue.Pending.Dequeue();
+        await _h.ProcessAsync(seedMessage); // 4 children queued
+        var last = _h.Queue.Pending.Dequeue();
+        await _h.DrainAsync();          // the other 3 processed; `last` never arrives cleanly
+
+        await using (var db = _h.Db())
+        {
+            (await db.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Running); // one page still Queued
+        }
+
+        await using (var db = _h.Db())
+        {
+            var processor = new PageProcessor(db, new PageFetcher(new HttpClient(_h.Site, false), Microsoft.Extensions.Options.Options.Create(_h.Options)), _h.Queue,
+                Microsoft.Extensions.Options.Options.Create(_h.Options), TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<PageProcessor>.Instance);
+            await processor.GiveUpAsync(last with { Attempt = 3 }, "database unreachable", CancellationToken.None);
+        }
+
+        await using var check = _h.Db();
+        var page = await check.Pages.SingleAsync(p => p.Id == last.PageId);
+        page.Status.ShouldBe(PageStatus.Failed);
+        page.Error.ShouldNotBeNull().ShouldContain("Gave up after 3 attempts");
+        (await check.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Completed);
+    }
+
+    [Fact]
     public async Task A_message_for_an_unknown_job_is_poison()
     {
         var result = await _h.ProcessAsync(new CrawlPageMessage(Guid.NewGuid(), Guid.NewGuid(), "https://shop.test/", 0));

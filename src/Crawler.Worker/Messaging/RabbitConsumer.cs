@@ -81,6 +81,7 @@ public sealed class RabbitConsumer(
 
                 case ProcessOutcome.Transient:
                     logger.LogError("Giving up on page {PageId} after {Attempt} attempts: {Reason}; dead-lettering", message.PageId, message.Attempt, result.Reason);
+                    await GiveUpAsync(message, result.Reason ?? "unknown", stoppingToken);
                     await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, stoppingToken);
                     break;
 
@@ -95,6 +96,20 @@ public sealed class RabbitConsumer(
         logger.LogInformation("Worker consuming {Queue} (prefetch {Prefetch})", RabbitTopology.WorkQueue, connection.Options.Prefetch);
 
         await Task.Delay(Timeout.Infinite, stoppingToken).ContinueWith(_ => { }, TaskScheduler.Default);
+    }
+
+    /// <summary>Record the give-up on the page so the job can still complete; the message itself goes to the DLQ.</summary>
+    private async Task GiveUpAsync(CrawlPageMessage message, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await using var scope = scopes.CreateAsyncScope();
+            await scope.ServiceProvider.GetRequiredService<PageProcessor>().GiveUpAsync(message, reason, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Could not record the give-up for page {PageId}; the job may stay Running until the page is swept", message.PageId);
+        }
     }
 
     /// <summary>The broker may still be starting when the worker does. Wait for it rather than crash-loop.</summary>

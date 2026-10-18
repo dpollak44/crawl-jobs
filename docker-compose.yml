@@ -29,6 +29,7 @@ services:
       retries: 20
 
   api:
+    image: crawl-jobs-api
     build:
       context: .
       args:
@@ -52,6 +53,7 @@ services:
       retries: 20
 
   worker:
+    image: crawl-jobs-worker
     build:
       context: .
       args:
@@ -72,6 +74,7 @@ services:
       retries: 20
 
   web:
+    image: crawl-jobs-web
     build:
       context: ./src/web
       args:

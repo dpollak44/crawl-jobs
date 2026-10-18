@@ -1,78 +1,263 @@
-# <Assignment name>
+# Crawl Jobs
 
-<One paragraph: what this service does, in plain English, for a reviewer who has not read the brief.>
+A small job-based web crawler: submit a website address, a worker crawls it asynchronously through a message
+queue, every page and link is stored in Postgres, and a React UI shows progress, the page tree with each
+page's Domain Link Ratio, and the history of past jobs.
+
+Built in a four-hour window. The sections at the end say what I built first, what I cut, and what I would do next.
 
 ## Run it
 
+Requires Docker. One command brings up five containers (Postgres, RabbitMQ, API, worker, web):
+
 ```bash
-dotnet test                              # unit + integration tests
-dotnet run --project src/Crawler.Api    # then open the printed URL + /scalar
+docker compose up --build
 ```
 
-Requires the .NET 10 SDK (`global.json`). SQLite file `crawler.db` is created on first run; delete it to reset.
-Or: `docker build -t takehome . && docker run --rm -p 8080:8080 takehome` then <http://localhost:8080/scalar>.
+| What                                | Where                              |
+| ----------------------------------- | ---------------------------------- |
+| UI                                  | http://localhost:3000              |
+| API + interactive docs              | http://localhost:8080/swagger      |
+| API health (checks DB and broker)   | http://localhost:8080/health       |
+| Worker health                       | http://localhost:8081/health       |
+| RabbitMQ management (guest / guest) | http://localhost:15672             |
+| Postgres                            | localhost:5433 (crawler / crawler) |
 
-## What I built
+Try it: paste `https://quotes.toscrape.com/` into the UI with depth 1. It finishes in about ten seconds.
 
-- [ ] <acceptance criterion 1 from the brief>
-- [ ] <acceptance criterion 2>
+Run the tests (no Docker needed; they use SQLite in memory and a fake internet):
 
-## Design in 60 seconds
+```bash
+dotnet test
+```
 
-- **Domain** (`src/Crawler.Domain`): rules on the entity, `Result` instead of exceptions for expected failures,
-  no framework references, tested without a host.
-- **API** (`src/Crawler.Api`): Minimal API, one folder per feature, validation at the edge, EF Core + SQLite.
-- **Nothing silently dropped**: an import reports read / accepted / rejected / duplicate counts that tie out,
-  and keeps every rejected line with its reason.
-- **Concurrency**: a version token on records two people could edit; the stale writer gets a 409, not a
-  silent overwrite.
-- **Integrations**: outbound calls retry with backoff and time out; what still fails is a row you can see and
-  retry.
-- **Errors**: users see plain English and a reference id; the log line carries the detail.
-- **Tests**: domain rules without a host; endpoints over real HTTP against SQLite in-memory with the external
-  system faked.
+Local development without containers: `docker compose up db broker`, then `dotnet run --project src/Crawler.Api`,
+`dotnet run --project src/Crawler.Worker`, and `npm run dev` in `src/web` (the dev server proxies `/api`).
 
-## Assumptions
+## How it works
 
-- <Each ambiguity in the brief and the reading I chose, one line each.>
+```
+ browser ──► web (React, static files)       its own address, as a CDN would be
+    │
+    └──► api  ──writes──►  Postgres  ◄──writes── worker
+          │                                        ▲
+          └── publishes "fetch page X" ──► RabbitMQ ┘   one message per page
+```
+
+- **API** creates jobs and answers questions. It never crawls. Creating a job writes the job row and the
+  starting page row (status `Queued`), then publishes one message.
+- **Worker** takes one message, fetches that page, extracts links, computes the ratio, and in one database
+  transaction records the page, its links, and a `Queued` row for each newly discovered same-site page.
+  Then it publishes one message per new page and asks: does this job have any page still `Queued`? If not,
+  the job is complete.
+- **The queue holds work, not state.** The database is the only record. Progress, the tree and history are
+  all read from the three tables.
+
+### Code layout
+
+| Project                      | Role                                                                                                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/Crawler.Domain`         | The rules: URL normalization, same-site scope, link extraction, ratio, job/page state. No database, no network, no web. Unit-tested in isolation.                                           |
+| `src/Crawler.Infrastructure` | Postgres (EF Core) and RabbitMQ: table mapping, queue topology, the message contract, shared host defaults (JSON logs, health checks). Shared by API and worker so they can never disagree. |
+| `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                               |
+| `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                               |
+| `src/web`                    | React + Vite + TypeScript. Three screens.                                                                                                                                                   |
+| `tests/*`                    | 65 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
+
+Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
+replaced, without starting anything.
+
+## API
+
+| Method | Path                           | What                                                                                                       |
+| ------ | ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `POST` | `/api/jobs`                    | `{ "url": "https://…", "maxDepth": 2, "maxPages": 200 }` → `202 { "jobId" }`. Depth and page cap optional. |
+| `GET`  | `/api/jobs/{id}`               | Status, timestamps, failure reason, progress counts (discovered / fetched / failed / skipped / queued).    |
+| `GET`  | `/api/jobs/{id}/tree`          | The page tree: each node has url, depth, status, ratio, link counts, children.                             |
+| `GET`  | `/api/jobs?page=1&pageSize=20` | History, newest first, paged (cap in config).                                                              |
+| `POST` | `/api/jobs/{id}/cancel`        | Cancel. Remaining pages are skipped; nothing more is fetched.                                              |
+
+Errors follow Problem Details: `400` names the field and says what to change; `404`; `409` states the rule
+("A Canceled job cannot be canceled"); `500` carries a reference id and never a stack trace.
+
+## Crawling rules
+
+- **Normalization** (`UrlNormalizer`): resolve relative to the page it was found on; http(s) only; drop the
+  fragment; lowercase scheme and host; drop default ports; strip a trailing slash except on the root; keep
+  path case and the query string as written. Two spellings of one page produce one key, and that key is the
+  uniqueness rule in the database.
+- **Same site** (`SiteScope`): same host, ignoring a leading `www.` and ignoring the scheme. Subdomains are
+  outside by default (the brief defines the domain as the host); `Crawl:IncludeSubdomains` flips that.
+- **Depth**: the starting page is depth 0; default max depth 2 fetches three levels.
+- **Links counted** for the ratio: every `<a href>`, normalized, de-duplicated; `mailto:` / `tel:` /
+  `javascript:` ignored; links to the page itself ignored. Every outgoing link is stored as an edge,
+  including off-site ones, so a ratio can be audited.
+- **Links followed**: only same-site links, within depth, under the page cap. Off-site pages are counted,
+  never fetched. HTML only: a link to a PDF is counted, requested (headers only), and recorded as `Skipped`
+  when the reply is not HTML. Bodies are capped at 2 MB.
+- **Redirects**: followed by the fetcher itself, up to 5 hops, final address recorded. The .NET client
+  refuses https→http redirects on principle; for a crawler the same host over http is the same site, so we
+  follow it. A redirect that leaves the site records the page as `Skipped`, not crawled.
+- **Domain Link Ratio** = same-site links / all links; 0 when a page has no links.
+
+## Event-driven design
+
+### Message schema
+
+One message type, `CrawlPageMessage`, JSON on RabbitMQ, persistent:
+
+```json
+{
+  "jobId": "…",
+  "pageId": "…",
+  "url": "https://example.com/about",
+  "depth": 1,
+  "attempt": 1
+}
+```
+
+Properties: `messageId` = `pageId:attempt`, `correlationId` = `jobId`, `contentType` = `application/json`.
+It carries ids, not state. One message per page, not per job: several workers can share a job, progress is
+real, and the idempotency requirement means something.
+
+### Idempotency
+
+- A page row exists, status `Queued`, **before** its message is published. Pages are unique on
+  `(JobId, Url)`; edges are unique on `(JobId, ParentPageId, ChildUrl)`. The database refuses duplicates.
+- The worker checks the page's status first. If it is no longer `Queued`, the message is a duplicate: the
+  page is not fetched again, no rows are written, and the worker only re-publishes any of that page's
+  children that are still `Queued`. Then it acks.
+- Page, edges and newly discovered child rows are written in **one transaction**; child messages are
+  published only after it commits, so a message can never refer to a page that is not there yet.
+- Two workers discovering the same child in the same instant: the unique index rejects the second insert;
+  that message is retried and the second pass finds the rows already present.
+- The page cap is a counter on the job row, guarded by a concurrency token, raised only while below the
+  cap: two workers cannot both slip past 200.
+
+Test: `PageProcessorTests.Delivering_the_same_message_twice_creates_no_duplicate_rows`.
+
+### Retry policy
+
+Two different failures, handled differently:
+
+| Failure                                                                                                      | Who retries                      | Policy                                                                                                                                                                   | Then                                                                                                           |
+| ------------------------------------------------------------------------------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| The target website is slow or down (timeout, 5xx, connection refused)                                        | HTTP client (resilience handler) | 10 s per attempt, 2 retries with backoff and jitter, circuit breaker                                                                                                     | Page recorded as `Failed` with the reason; the job continues. If the starting page fails, the job is `Failed`. |
+| Our own infrastructure (database unreachable, unique-index race, concurrency conflict, unexpected exception) | Message pipeline                 | Republished to `crawl.pages.retry` with `attempt + 1`; the retry queue holds it 5 s (`x-message-ttl`) then dead-letters it back onto the work exchange; up to 3 attempts | Page marked `Failed` ("gave up after 3 attempts"), job completion re-checked, message to the dead-letter queue |
+
+"Transient" means: it may succeed if tried again without anyone changing anything. A 404 on a page is not
+transient; a database connection reset is.
+
+### Dead-letter queue
+
+`crawl.pages.dead`, bound to the `crawl.dead` exchange. Receives:
+
+- **Poison** messages immediately: unreadable JSON, missing ids, a job or page id that does not exist.
+- **Exhausted** messages: transient failures after 3 attempts. Before the message is dead-lettered the page
+  is marked `Failed` with the reason, so the job still reaches a final state and the UI shows what happened.
+
+Nothing in the DLQ is retried automatically. It is visible in the RabbitMQ management UI, and every
+rejection is logged at Error level with `JobId`, `PageId` and the reason: that log line is the alert hook.
+
+## SQL model and performance thinking
+
+Three tables. Every timestamp is UTC.
+
+| Table   | Key columns                                                                                                                                               | Why                                                                           |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `jobs`  | `Id`, `InputUrl`, `StartHost`, `MaxDepth`, `MaxPages`, `Status`, `PagesDiscovered` (cap counter, concurrency token), timestamps, `FailureReason`          | A job owns its own limits; changing a default later never changes an old job. |
+| `pages` | `Id`, `JobId`, `Url` (normalized), `Depth`, `ParentPageId` (first discovery), `Status`, `FinalUrl`, `HttpStatus`, link counts, `DomainLinkRatio`, `Error` | One row per page per job. Written at discovery, completed at fetch.           |
+| `links` | `Id`, `JobId`, `ParentPageId`, `ChildUrl`, `IsInternal`                                                                                                   | Every outgoing link, the evidence behind each ratio.                          |
+
+Indexes follow the questions the system asks constantly: `jobs(CreatedAt desc)` for history;
+`pages(JobId, Url) unique` for idempotency and the duplicate check; `pages(JobId, Status)` for "any page
+still queued?" and progress counts; `pages(JobId, ParentPageId)` for the tree; `links(JobId, ParentPageId,
+ChildUrl) unique` for edge idempotency.
+
+Progress is a `GROUP BY status` over one job's pages, not a counter that can drift. The tree is one query
+for a job's pages (bounded by the page cap) built in memory, which beats a recursive query at this size.
+History lists jobs with one grouped query for the counts of the jobs on that page, never one query per row.
+Everything a user reads is indexed by `JobId` first.
+
+Schema is created on boot with `EnsureCreated` (take-home scale). Production would run EF migrations as a
+release step; see next steps.
+
+## Observability
+
+- Structured JSON logs outside Development. Every worker log line carries `JobId`, `PageId` and `Attempt`
+  through a logging scope; the API logs job creation with the job id. Request logs record method, path,
+  status and duration, never bodies.
+- Health: the API checks the database and the broker; the worker exposes its own `/health`. Compose uses
+  these to start services in the right order (API after DB and broker; worker after the API has created the
+  schema).
 
 ## Configuration
 
-| Key                                 | Default                   | Meaning                                 |
-| ----------------------------------- | ------------------------- | --------------------------------------- |
-| `ConnectionStrings:Default`         | `Data Source=crawler.db` | SQLite file                             |
-| `Payer:BaseUrl`                     | `http://localhost:9999/`  | External system base address            |
-| `Resilience:Retry:MaxRetryAttempts` | 3                         | Automatic retries on transient failures |
+| Key                                                                            | Default                          | Meaning                                          |
+| ------------------------------------------------------------------------------ | -------------------------------- | ------------------------------------------------ |
+| `Crawl:DefaultMaxDepth` / `MaxDepthLimit`                                      | 2 / 5                            | Default and ceiling for a job's depth            |
+| `Crawl:DefaultMaxPages` / `MaxPagesLimit`                                      | 200 / 1000                       | Default and ceiling for a job's page cap         |
+| `Crawl:IncludeSubdomains`                                                      | false                            | Treat `blog.example.com` as inside `example.com` |
+| `Crawl:FetchTimeoutSeconds` / `FetchRetries` / `MaxRedirects` / `MaxBodyBytes` | 10 / 2 / 5 / 2 MB                | Fetching limits                                  |
+| `RabbitMq:RetryDelayMs` / `MaxAttempts` / `Prefetch`                           | 5000 / 3 / 8                     | Message retry policy and worker concurrency      |
+| `Cors:Origins`                                                                 | `http://localhost:3000`, `:5173` | Addresses the UI may call from                   |
+| `Paging:DefaultPageSize` / `MaxPageSize`                                       | 20 / 100                         | History paging                                   |
 
-## Scaling and operations
+## What I implemented first, and why
 
-The service is stateless, so it scales out behind a load balancer (App Service or Container Apps) with no
-code change. What changes at volume, and in what order:
+1. **The rules, with their tests, before anything else**: normalization, same-site scope, link extraction,
+   the ratio. They are the correctness core, the cheapest thing to get exactly right, and the tests caught a
+   real bug before any page was fetched (a relative link on a page ending in `/` resolved from the wrong
+   folder because I had tidied the page's own address before using it as the base).
+2. **The data model and the message, together.** One message per page and a page row that exists before its
+   message is what makes idempotency a property of the design rather than a check bolted on.
+3. **The worker, then a live run** against real Postgres and RabbitMQ before writing the UI. The live run
+   exposed the https→http redirect refusal; fixing it in the fetcher and adding two tests cost ten minutes
+   and would have cost far more discovered through the UI.
+4. **The UI last**, against a working back end, so it was built against real responses.
 
-1. **Database**: SQLite → Azure SQL. One connection string and deleting one value converter. Indexes already
-   exist on the lookup columns.
-2. **Large imports**: today the upload is parsed in the request. Past a few MB (configurable limit, default
-   10 MB) the file should land in blob storage and a queue-triggered worker should parse it; the summary
-   endpoint already returns a result by id, so the API shape does not change.
-3. **Outbound calls**: today they are dispatched in the request after being recorded. The recorded row is
-   the outbox; a worker draining it from Service Bus removes the partner's latency from the user's request
-   and adds scheduled retries for Failed rows.
-4. **Lists** are paged with a configured cap, so no endpoint can return an unbounded result.
-5. **Observability**: structured JSON logs with a reference id on every error; the health endpoint checks
-   the database. Application Insights is one package and one line; the alert rule is "any Error-level log".
-6. **Audit**: every state change writes who, when, from and to in the same transaction as the change.
+## What I cut, and why
 
-Measured before optimised: this is an internal tool for a billing team, not a public API. The first
-scaling step is the database; nothing else should move until load says so.
+- **Kafka**: RabbitMQ has native dead-lettering and TTL-based retry; the brief's requirements map onto it
+  directly with no extra code.
+- **Live push to the UI** (SSE/SignalR): polling every two seconds meets the requirement at a fraction of
+  the cost. The polling loop stops at a final state.
+- **Following off-site links**: unbounded and discourteous. Counted, recorded as edges, never fetched.
+- **Subdomains as same-site**: the brief defines the domain as the host. Left as a switch, off by default.
+- **An outbox**: if the broker is down when a job is created, the job is marked `Failed` with the reason
+  rather than left `Pending` forever. The full outbox pattern is the right fix and is next.
+- **Tests against real Postgres and RabbitMQ**: replaced by a fixture test with the two outside dependencies
+  faked, plus the compose run as the real-world proof. Testcontainers would be the next step.
+- **Authentication, rate limiting, robots.txt**: nothing in the brief needs them; each is a line in next steps.
+- **Serving the UI from the API**: deliberately not. Static files belong at the edge; the API stays close to
+  the data. Two addresses cost one CORS line.
 
-## Out of scope / next steps
+## What I would do next
 
-- <Auth, pagination, EF migrations, Azure deployment, alerting… whatever was deliberately left out.>
+- **Outbox and sweeper.** Write the message into the database in the same transaction as the job or page
+  row and relay it, so a broker outage can never lose a job; and a sweeper that re-publishes pages left
+  `Queued` too long. Today, if a worker dies after committing a page but before publishing its children,
+  those children stay `Queued` until the parent happens to be redelivered, and after an ack it is not.
+  This is the one known way a job can stall.
+- **Atomic cap counter.** The page cap uses an optimistic concurrency token, so two workers discovering
+  children on the same job at the same moment cost one retry (5 s). Under heavy parallelism the counter
+  should become a single `UPDATE … SET pages_discovered = pages_discovered + 1 WHERE pages_discovered < max`.
+- Scheduled reprocessing of the dead-letter queue with a cap, and an alert rule on the Error log line.
+- EF migrations as a release step; Testcontainers for Postgres and RabbitMQ in CI.
+- Live progress over SSE; the web container replaced by a CDN; the API behind a gateway.
+- Politeness: robots.txt, a per-host delay, a shared rate limit across workers.
+- Horizontal scale: the design already allows N workers (`docker compose up --scale worker=3`); measure it.
 
-## Time log
+## Assumptions and known limitations
 
-| Block     | What                              |
-| --------- | --------------------------------- |
-| 0:00–0:20 | Read brief, plan, README skeleton |
-| 0:20–1:30 | Vertical slice: …                 |
-| …         | …                                 |
+- The "starting domain" is the host of the URL you typed, with `www.` ignored; `blog.example.com` is outside.
+- http and https on the same host are the same site. Query-string order and path capitalisation are kept as
+  written, so `?a=1&b=2` and `?b=2&a=1` are two pages.
+- Trailing slashes are stripped, so sites that insist on them answer with a redirect, which we follow; it
+  costs one extra round trip per page on such sites.
+- Non-HTML links are requested to learn their type (headers only; the body is never read). A HEAD request
+  first would save a round trip on some servers; not done.
+- Schema is created on boot, not migrated. A job's pages and links are deleted with the job (cascade).
+- The page cap counts discovered pages, including ones that later fail or are skipped.
+- No authentication; the API trusts its network.
+- The UI's TypeScript types mirror the API contracts by hand; a generator would keep them in lockstep.

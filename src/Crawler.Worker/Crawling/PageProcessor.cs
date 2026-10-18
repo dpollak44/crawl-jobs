@@ -129,6 +129,32 @@ public sealed class PageProcessor(
         return new ProcessResult(ProcessOutcome.Done);
     }
 
+    /// <summary>
+    /// Called by the consumer when a message has exhausted its retries. The message goes to the dead-letter
+    /// queue, but the PAGE must not stay Queued forever or the job would never complete: record the give-up on
+    /// the page, fail the job if it was the starting page, and run the completion check.
+    /// </summary>
+    public async Task GiveUpAsync(CrawlPageMessage message, string reason, CancellationToken ct)
+    {
+        var job = await db.Jobs.FirstOrDefaultAsync(j => j.Id == message.JobId, ct);
+        var page = await db.Pages.FirstOrDefaultAsync(p => p.Id == message.PageId && p.JobId == message.JobId, ct);
+        if (job is null || page is null || page.Status != PageStatus.Queued)
+        {
+            return;
+        }
+
+        var now = clock.GetUtcNow();
+        page.MarkFailed($"Gave up after {message.Attempt} attempts: {reason}", null, now);
+        if (page.ParentPageId is null)
+        {
+            job.MarkFailed($"The starting page could not be processed: {reason}", now);
+        }
+
+        await db.SaveChangesAsync(ct);
+        logger.LogError("Page {PageId} marked Failed after {Attempt} attempts: {Reason}", page.Id, message.Attempt, reason);
+        await CompleteIfFinishedAsync(job, ct);
+    }
+
     private async Task<List<CrawlPage>> DiscoverChildrenAsync(CrawlJob job, CrawlPage parent, List<Uri> internalLinks, CancellationToken ct)
     {
         var children = new List<CrawlPage>();
