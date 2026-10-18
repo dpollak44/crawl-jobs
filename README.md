@@ -17,7 +17,7 @@ docker compose up --build
 | What                                | Where                                                                                               |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------- |
 | UI                                  | http://localhost:3000                                                                               |
-| API + interactive docs (Swagger)    | http://localhost:8080/swagger (on in every environment; see "Key decisions")                        |
+| API + interactive docs (Swagger)    | http://localhost:8080/swagger (on in every environment, by design: the API has no login to hide behind) |
 | API health (checks DB and broker)   | http://localhost:8080/health                                                                        |
 | Worker health                       | shown by `docker compose ps` (checked inside the container; no host port, so workers can be scaled) |
 | RabbitMQ management (guest / guest) | http://localhost:15672                                                                              |
@@ -312,13 +312,11 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
 
 ## Key decisions
 
-- **Swagger is on in every environment**, not only in Development. The API has no login and is meant to be
-  read by people as well as by the UI; hiding its documentation in production would protect nothing (the
-  routes are the same) and cost the operator the one page that shows what the service does. Once the API has
-  authentication, the docs sit behind it like everything else.
-
 - **RabbitMQ over Kafka.** Both were offered. RabbitMQ has native dead-lettering and TTL-based retry, so the
   brief's requirements map onto it directly with no extra code; Kafka would have meant building both.
+- **One message per page, not per job.** Several workers share one crawl, a retry is one page rather than a
+  whole site, and because a page row exists before its message does, a message delivered twice finds the page
+  already done. Idempotency is a property of the model, not a check added afterwards.
 - **The UI served from its own container, not by the API.** Static files belong at the edge, close to the
   user; the API stays close to the data. Two addresses cost one CORS line, and the web container is what a
   CDN replaces in production.
@@ -346,18 +344,12 @@ dead-lettered. (Before the atomic cap reservation the same job took 72 s with 14
 - Authentication on the API and the UI: today anyone who can reach the API can start crawls.
 - Crawl analytics and benchmarking: pages per second, failure rate and the ratio distribution per job,
   tracked over time, so a regression in a site or in the crawler is visible.
-- **Per-site body limit.** The 2 MB page limit is a safety rule for the unknown internet, and some legitimate
-  sites exceed it (one tested home page is 13 MB of HTML and takes ~48 s to download; today it is recorded as
-  skipped with that reason and the crawl stops beneath it). Next: an optional per-site override, granted when
-  the site is verified legitimate and its other pages crawl cleanly, still under a hard ceiling and the
-  body-read timeout. Deliberately not a blanket increase, which would only move the problem to the next
-  bigger site.
-- **AI-assisted operations decisions.** Approving a per-site override, judging whether a skipped site is
-  legitimate, or deciding whether a dead-lettered message is worth replaying are judgement calls a human
-  makes today. Next: an AI step that researches the site on the web (reputation, ownership, whether its
-  other pages crawled cleanly) and recommends, inside fixed guard rails: a hard ceiling it cannot raise, a
-  logged reason for every recommendation, and a human review only for the cases it cannot decide with
-  confidence. The aim is that most of these decisions need no person at all.
+- **Per-site body limit.** The 2 MB limit is a safety rule for the unknown internet, and some legitimate sites
+  exceed it (one tested home page is 13 MB and takes ~48 s). Next: a per-site override, granted once the site is
+  verified and its other pages crawl cleanly, under a hard ceiling; not a blanket increase.
+- **AI-assisted operations decisions.** Approving an override or judging a skipped site is a human call today.
+  Next: an AI step that researches the site and recommends inside fixed guard rails: a hard ceiling it cannot
+  raise, a logged reason for every recommendation, and human review only when it cannot decide.
 
 **Operations**
 
