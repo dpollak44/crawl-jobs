@@ -477,4 +477,44 @@ public class PageProcessorTests : IDisposable
         (await check.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Canceled);
         (await check.Pages.SingleAsync(p => p.Id == seed.Id)).Status.ShouldBe(PageStatus.Failed);
     }
+
+    [Fact]
+    public async Task A_starting_page_on_a_private_address_is_never_requested()
+    {
+        var (job, _) = await _h.StartJobAsync("http://10.0.0.5/admin");
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(PageStatus.Skipped);
+        page.Error.ShouldNotBeNull().ShouldContain("Not a public web address");
+        _h.Site.Requests.ShouldBe(0);
+        (await db.Jobs.SingleAsync(j => j.Id == job.Id)).Status.ShouldBe(JobStatus.Failed);
+    }
+
+    [Fact]
+    public async Task A_page_whose_header_names_no_charset_is_decoded_by_its_own_meta_declaration()
+    {
+        // windows-1252 bytes: "café" has 0xE9 for é. Decoded as UTF-8 by mistake it would become a replacement character.
+        System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+        var html = "<html><head><meta charset=\"windows-1252\"></head><body><a href=\"/caf\u00e9\">menu</a></body></html>";
+        var bytes = System.Text.Encoding.GetEncoding(1252).GetBytes(html);
+        _h.Site.Bytes("https://shop.test/menu", bytes).Html("https://shop.test/café", "leaf.html");
+        var (job, _) = await _h.StartJobAsync("https://shop.test/menu", maxDepth: 1);
+
+        await _h.DrainAsync();
+
+        await using var db = _h.Db();
+        var child = await db.Pages.SingleAsync(p => p.JobId == job.Id && p.Depth == 1);
+        child.Url.ShouldBe("https://shop.test/café"); // é survived because the page was decoded as it said; decoded as UTF-8 it would be garbage
+        child.Status.ShouldBe(PageStatus.Fetched);
+    }
+
+    [Fact]
+    public void The_sweeper_default_matches_the_documented_five_minutes()
+    {
+        new Crawler.Infrastructure.CrawlOptions().StuckAfterSeconds.ShouldBe(300);
+        new Crawler.Infrastructure.CrawlOptions().SweepIntervalSeconds.ShouldBe(60);
+    }
 }

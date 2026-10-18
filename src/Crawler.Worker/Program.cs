@@ -19,6 +19,7 @@ builder.Services.AddHttpClient<PageFetcher>(c =>
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
     {
         AllowAutoRedirect = false, // PageFetcher follows redirects itself: same-host http/https hops allowed, final URL recorded, hops capped
+        ConnectCallback = GuardedConnect.ConnectAsync, // never dial a private or internal address, whatever a name resolves to
         PooledConnectionLifetime = TimeSpan.FromMinutes(2),
     })
     .AddResilienceHandler("fetch", b => b.AddPipeline(FetchPipeline.Build(crawl))); // see FetchPipeline: retries + timeouts, no shared breaker

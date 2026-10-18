@@ -36,6 +36,18 @@ public sealed class FakeSite : HttpMessageHandler
     }
 
     /// <summary>A real 3xx reply: the fetcher must follow it (or refuse it) itself.</summary>
+    /// <summary>A reply with exact bytes and a media type that names NO charset, so the page's own declaration must be used.</summary>
+    public FakeSite Bytes(string url, byte[] body, string mediaType = "text/html")
+    {
+        _replies[url] = () =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+            response.Content.Headers.ContentType = new MediaTypeHeaderValue(mediaType);
+            return response;
+        };
+        return this;
+    }
+
     public FakeSite Redirect(string from, string to, HttpStatusCode status = HttpStatusCode.PermanentRedirect)
     {
         _replies[from] = () =>

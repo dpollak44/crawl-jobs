@@ -32,6 +32,11 @@ public sealed class PageFetcher(HttpClient http, IOptions<CrawlOptions> options)
     /// <param name="mayFollow">Decides, before anything is read, whether a redirect target may be fetched (same site, public address).</param>
     public async Task<FetchResult> FetchAsync(Uri url, Func<Uri, bool> mayFollow, CancellationToken ct)
     {
+        if (!AddressGuard.IsPublicWebAddress(url))
+        {
+            return new FetchResult(FetchOutcome.OutOfScope, url, null, null, $"Not a public web address ({url.Scheme}://{url.Host}); not requested.");
+        }
+
         var current = url;
         for (var hop = 0; hop <= options.Value.MaxRedirects; hop++)
         {

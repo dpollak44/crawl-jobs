@@ -62,8 +62,8 @@ Local development without containers: `docker compose up db broker`, then `dotne
 | `src/Crawler.Infrastructure` | Postgres (EF Core) and RabbitMQ: table mapping, queue topology, the message contract, shared host defaults (JSON logs, health checks). Shared by API and worker so they can never disagree.                                                                                                                                                                   |
 | `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                                                                                                                                                                                                 |
 | `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                                                                                                                                                                                                 |
-| `src/web`                    | React + Vite + TypeScript, one page: history first, a New crawl form in place, the selected job beside it with live progress and the tree. Structure: `api/` (client + types), `hooks/` (`useJob` live stream with polling fallback, `useHistory`, `useTree`), `components/`, `pages/Dashboard`, `lib/format`. Plain CSS with design tokens, no UI framework. |
-| `tests/*`                    | 125 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                                                                                                                                                                                            |
+| `src/web` | React + Vite + TypeScript. Two pages: the crawl list with a New crawl form in place, and a job page (status, timings, live progress, the tree) that opens from a row. Structure: `api/` (client + types), `hooks/` (`useJob` live stream with polling fallback and auto-reopen, `useHistory`, `useTree`), `components/`, `pages/`, `lib/format`. Plain CSS with design tokens, no UI framework. |
+| `tests/*`                    | 147 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                                                                                                                                                                                            |
 
 Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
 replaced, without starting anything.
@@ -83,11 +83,11 @@ Errors follow Problem Details: `400` names the field and says what to change; `4
 
 ### The UI
 
-One page. The job list is the first thing on screen, newest first, refreshing on its own while anything is
-running; **New crawl** opens the form in place; the selected job sits beside the list with its status,
-timings, live progress bar and, once final, the page tree with each page's ratio drawn as a small bar. The
-URL carries the selection (`/jobs/{id}`), so a job can be linked to. Loading, empty and error states are
-explicit. The brief's three screens (start, job details, history) are the three regions of this one page.
+Two pages. The home page is the list of crawls, newest first, refreshing on its own while anything is
+running, with **New crawl** opening the form in place. Clicking a row opens the job on its own page: status,
+depth and cap, start time and duration, a live progress bar and, once final, the page tree with each page's
+ratio drawn as a small bar; one link back to the list. Loading, empty and error states are explicit, and an
+unknown job offers the way back.
 
 ### Live progress
 
@@ -134,9 +134,12 @@ mode without a reload. A production gateway must not buffer this endpoint (the r
   refuses https→http redirects on principle; for a crawler the same host over http is the same site, so we
   follow it. Each hop is judged before anything is read: a redirect that leaves the site, or points at a
   non-web or private address, records the page as `Skipped` and its body is never downloaded.
-- **Never inside our own network**: links and redirect targets to loopback, link-local, private ranges,
-  literal IPs in those ranges, `localhost`, `.local` and `.internal` are refused (`AddressGuard`). Names that
-  resolve to private addresses are a DNS-level check and a next step.
+- **Never inside our own network**: two layers. By name, before any request (the start address at the create
+  endpoint, every discovered link, every redirect hop, and the first request itself): loopback, link-local,
+  private ranges, carrier-grade NAT, literal IPs in those ranges, `localhost`, `.local` and `.internal` are
+  refused (`AddressGuard`). And at connection time: the worker's HTTP handler resolves each host itself and
+  dials only public addresses (`GuardedConnect`), so a public-looking name that resolves to an internal address,
+  or is rebound to one mid-crawl, is refused.
 - **Character set**: from the response header, else the page's own `<meta charset>`, else UTF-8.
 - **Domain Link Ratio** = same-site links / all links; 0 when a page has no links.
 

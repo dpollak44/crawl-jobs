@@ -1,22 +1,25 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
-import { Dashboard } from "./pages/Dashboard";
+import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
+import { JobsPage } from "./pages/JobsPage";
+import { JobPage } from "./pages/JobPage";
 import "./styles.css";
 
 function App() {
     return (
         <BrowserRouter>
             <header className="topbar">
-                <span className="brand">Crawl Jobs</span>
+                <Link className="brand" to="/">
+                    Crawl Jobs
+                </Link>
                 <span className="muted small">
                     Submit a site, watch it crawl, see where its links go.
                 </span>
             </header>
             <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/jobs/:jobId" element={<Dashboard />} />
-                <Route path="/history" element={<Dashboard />} />
+                <Route path="/" element={<JobsPage />} />
+                <Route path="/history" element={<JobsPage />} />
+                <Route path="/jobs/:jobId" element={<JobPage />} />
             </Routes>
         </BrowserRouter>
     );

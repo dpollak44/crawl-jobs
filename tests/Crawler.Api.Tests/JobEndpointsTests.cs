@@ -185,4 +185,50 @@ public class JobEndpointsTests : IClassFixture<ApiFactory>
         second.StatusCode.ShouldBe(HttpStatusCode.Conflict);
         (await second.Content.ReadAsStringAsync()).ShouldContain("Canceled job cannot be canceled");
     }
+
+    [Fact]
+    public async Task A_starting_address_over_the_limit_gets_a_plain_message_not_a_500()
+    {
+        var response = await _client.PostAsJsonAsync("/api/jobs", new CreateJobRequest("https://example.com/?t=" + new string('x', 2100), null, null));
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).ShouldContain("too long to crawl");
+    }
+
+    [Theory]
+    [InlineData("http://10.0.0.5/")]
+    [InlineData("http://169.254.169.254/latest/meta-data")]
+    [InlineData("http://intranet.internal/")]
+    [InlineData("http://[::1]/")]
+    public async Task A_private_or_internal_starting_address_is_refused_with_a_plain_message(string url)
+    {
+        var response = await _client.PostAsJsonAsync("/api/jobs", new CreateJobRequest(url, null, null));
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).ShouldContain("private or internal");
+    }
+
+    [Fact]
+    public async Task Cancel_replies_with_the_real_progress_counts()
+    {
+        var create = await _client.PostAsJsonAsync("/api/jobs", new CreateJobRequest("https://counts.example.com", null, null));
+        var jobId = (await create.Content.ReadFromJsonAsync<CreateJobResponse>())!.JobId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var seed = db.Pages.Single(p => p.JobId == jobId);
+            seed.MarkFetched(new Uri("https://counts.example.com/"), 200, 2, 2, 1m, DateTimeOffset.UtcNow);
+            db.Pages.Add(CrawlPage.Discover(jobId, new Uri("https://counts.example.com/a"), 1, seed.Id, DateTimeOffset.UtcNow));
+            db.Pages.Add(CrawlPage.Discover(jobId, new Uri("https://counts.example.com/b"), 1, seed.Id, DateTimeOffset.UtcNow));
+            db.SaveChanges();
+        }
+
+        var reply = await _client.PostAsync($"/api/jobs/{jobId}/cancel", null);
+
+        reply.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var summary = (await reply.Content.ReadFromJsonAsync<JobSummary>())!;
+        summary.Status.ShouldBe("Canceled");
+        summary.Progress.Fetched.ShouldBe(1);
+        summary.Progress.Queued.ShouldBe(2); // the screen never flashes "0 of N"
+    }
 }
