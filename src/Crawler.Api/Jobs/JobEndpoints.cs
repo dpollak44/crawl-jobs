@@ -44,7 +44,7 @@ public static class JobEndpoints
             return TypedResults.ValidationProblem(validation.ToDictionary());
         }
 
-        var seedUrl = new Uri(request.Url, UriKind.Absolute);
+        var seedUrl = new Uri(request.UrlWithScheme, UriKind.Absolute);
         UrlNormalizer.TryNormalize(seedUrl.ToString(), seedUrl, out var normalizedSeed);
 
         var now = clock.GetUtcNow();
@@ -58,14 +58,15 @@ public static class JobEndpoints
         // reason, not a job stuck at Pending forever. The thorough fix is an outbox (see README, next steps).
         try
         {
-            await publisher.PublishAsync(new CrawlPageMessage(job.Id, seed.Id, seed.Url, 0), ct);
+            // The job is saved; finish scheduling it even if the caller disconnected this instant (CancellationToken.None).
+            await publisher.PublishAsync(new CrawlPageMessage(job.Id, seed.Id, seed.Url, 0), CancellationToken.None);
             logger.LogInformation("Job {JobId} created for {Url} (depth {MaxDepth}, cap {MaxPages})", job.Id, job.InputUrl, job.MaxDepth, job.MaxPages);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "Job {JobId} could not be scheduled: broker unavailable", job.Id);
             job.MarkFailed("Could not schedule the crawl: the message broker is unavailable. Try again in a minute.", clock.GetUtcNow());
-            await db.SaveChangesAsync(ct);
+            await db.SaveChangesAsync(CancellationToken.None);
         }
 
         return TypedResults.Accepted($"/api/jobs/{job.Id}", new CreateJobResponse(job.Id));

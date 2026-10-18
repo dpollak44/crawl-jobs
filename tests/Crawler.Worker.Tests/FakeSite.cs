@@ -56,6 +56,34 @@ public sealed class FakeSite : HttpMessageHandler
         return this;
     }
 
+    private readonly HashSet<string> _drips = new(StringComparer.Ordinal);
+
+    /// <summary>Headers arrive at once, then the body never completes. Exercises the body-read timeout.</summary>
+    public FakeSite Drip(string url)
+    {
+        _drips.Add(url);
+        return this;
+    }
+
+    private sealed class NeverEndingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         Requests++;
@@ -64,6 +92,13 @@ public sealed class FakeSite : HttpMessageHandler
         {
             await Task.Delay(delay, cancellationToken); // the per-attempt timeout cancels this
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<html></html>", System.Text.Encoding.UTF8, "text/html"), RequestMessage = request };
+        }
+
+        if (_drips.Contains(key))
+        {
+            var dripping = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new NeverEndingStream()), RequestMessage = request };
+            dripping.Content.Headers.ContentType = new MediaTypeHeaderValue("text/html");
+            return dripping;
         }
 
         var response = _replies.TryGetValue(key, out var make) ? make() : new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("not found") };

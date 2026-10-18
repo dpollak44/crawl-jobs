@@ -74,7 +74,18 @@ public sealed class PageFetcher(HttpClient http, IOptions<CrawlOptions> options)
                     return new FetchResult(FetchOutcome.NotHtml, current, status, null, $"Not an HTML page ({(mediaType.Length == 0 ? "no content type" : mediaType)}).");
                 }
 
-                return await ReadHtmlAsync(response, current, status, ct);
+                // The per-attempt timeout covered the headers only (ResponseHeadersRead). Give the body its own clock,
+                // or a server that drips one byte a minute would hold this worker forever.
+                using var bodyClock = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                bodyClock.CancelAfter(TimeSpan.FromSeconds(options.Value.FetchTimeoutSeconds));
+                try
+                {
+                    return await ReadHtmlAsync(response, current, status, bodyClock.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    return new FetchResult(FetchOutcome.Unreachable, current, status, null, $"Timed out reading the page body after {options.Value.FetchTimeoutSeconds} s.");
+                }
             }
         }
 

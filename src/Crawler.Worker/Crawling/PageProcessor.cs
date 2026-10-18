@@ -10,9 +10,10 @@ namespace Crawler.Worker.Crawling;
 
 public enum ProcessOutcome
 {
-    Done,      // acknowledge the message
-    Transient, // our own infrastructure hiccupped: retry the message later
-    Poison,    // the message can never succeed: dead-letter it
+    Done,                      // acknowledge the message
+    Transient,                 // a one-off failure (concurrent write, unexpected exception): retry, spending an attempt
+    InfrastructureUnavailable, // database or broker unreachable: retry later WITHOUT spending an attempt
+    Poison,                    // the message can never succeed: dead-letter it
 }
 
 public sealed record ProcessResult(ProcessOutcome Outcome, string? Reason = null);
@@ -111,6 +112,11 @@ public sealed class PageProcessor(
 
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
+        }
+        catch (DbUpdateException ex) when (Messaging.FailureKind.IsInfrastructureUnavailable(ex))
+        {
+            logger.LogWarning(ex, "Database unavailable while saving job {JobId}; message will wait", job.Id);
+            return new ProcessResult(ProcessOutcome.InfrastructureUnavailable, "Database unavailable.");
         }
         catch (DbUpdateException ex)
         {

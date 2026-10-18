@@ -296,6 +296,23 @@ public class PageProcessorTests : IDisposable
     }
 
     [Fact]
+    public async Task A_server_that_sends_headers_but_never_finishes_the_body_is_recorded_as_unreachable()
+    {
+        _h.Options.FetchTimeoutSeconds = 1;
+        _h.Options.FetchRetries = 0;
+        _h.Site.Drip("https://shop.test/drip");
+        var (job, _) = await _h.StartJobAsync("https://shop.test/drip");
+
+        var result = await _h.ProcessAsync(_h.Queue.Pending.Dequeue());
+
+        result.Outcome.ShouldBe(ProcessOutcome.Done);
+        await using var db = _h.Db();
+        var page = await db.Pages.SingleAsync(p => p.JobId == job.Id);
+        page.Status.ShouldBe(PageStatus.Failed);
+        page.Error.ShouldNotBeNull().ShouldContain("reading the page body");
+    }
+
+    [Fact]
     public async Task A_message_for_an_unknown_job_is_poison()
     {
         var result = await _h.ProcessAsync(new CrawlPageMessage(Guid.NewGuid(), Guid.NewGuid(), "https://shop.test/", 0));

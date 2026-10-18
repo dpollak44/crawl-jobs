@@ -3,7 +3,11 @@ using FluentValidation;
 
 namespace Crawler.Api.Jobs;
 
-public sealed record CreateJobRequest(string Url, int? MaxDepth, int? MaxPages);
+public sealed record CreateJobRequest(string Url, int? MaxDepth, int? MaxPages)
+{
+    /// <summary>People type "example.com". Assume https when no scheme is given; redirects handle sites that only speak http.</summary>
+    public string UrlWithScheme => Url is null ? string.Empty : (Url.Trim().Contains("://", StringComparison.Ordinal) ? Url.Trim() : "https://" + Url.Trim());
+}
 
 public sealed record CreateJobResponse(Guid JobId);
 
@@ -37,9 +41,12 @@ public sealed class CreateJobRequestValidator : AbstractValidator<CreateJobReque
     public CreateJobRequestValidator(int maxDepthLimit, int maxPagesLimit)
     {
         RuleFor(x => x.Url)
-            .NotEmpty().WithMessage("Enter the address of the page to start from.")
-            .Must(u => Uri.TryCreate(u, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
-            .WithMessage("The address must be a full http or https URL, for example https://example.com.");
+            .NotEmpty().WithMessage("Enter the address of the page to start from.");
+        RuleFor(x => x.UrlWithScheme)
+            .Must(u => Uri.TryCreate(u, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" && uri.Host.Contains('.'))
+            .When(x => !string.IsNullOrWhiteSpace(x.Url))
+            .WithName("Url")
+            .WithMessage("That does not look like a website address. Try something like example.com or https://example.com/page.");
         RuleFor(x => x.MaxDepth).InclusiveBetween(0, maxDepthLimit).When(x => x.MaxDepth.HasValue)
             .WithMessage($"Depth must be between 0 and {maxDepthLimit}.");
         RuleFor(x => x.MaxPages).InclusiveBetween(1, maxPagesLimit).When(x => x.MaxPages.HasValue)

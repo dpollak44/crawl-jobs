@@ -35,16 +35,30 @@ public class JobEndpointsTests : IClassFixture<ApiFactory>
         summary.Progress.Queued.ShouldBe(1);
         summary.Progress.Discovered.ShouldBe(1);
 
-        var message = _factory.Publisher.Published.ShouldHaveSingleItem();
+        var message = _factory.Publisher.Published.Where(m => m.JobId == created.JobId).ShouldHaveSingleItem(); // the factory is shared by the class
         message.JobId.ShouldBe(created.JobId);
         message.Depth.ShouldBe(0);
         message.Url.ShouldBe("https://example.com/Docs");
     }
 
     [Theory]
+    [InlineData("example.com", "https://example.com/")]
+    [InlineData("  www.Example.com/Docs/  ", "https://www.example.com/Docs")]
+    [InlineData("http://example.com", "http://example.com/")]
+    public async Task An_address_without_a_scheme_is_accepted_and_assumed_https(string typed, string stored)
+    {
+        var response = await _client.PostAsJsonAsync("/api/jobs", new CreateJobRequest(typed, null, null));
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        var created = (await response.Content.ReadFromJsonAsync<CreateJobResponse>()).ShouldNotBeNull();
+        (await _client.GetFromJsonAsync<JobSummary>($"/api/jobs/{created.JobId}"))!.Url.ShouldBe(stored);
+    }
+
+    [Theory]
     [InlineData("", "Enter the address")]
-    [InlineData("not a url", "full http or https URL")]
-    [InlineData("ftp://example.com", "full http or https URL")]
+    [InlineData("not a url", "does not look like a website address")]
+    [InlineData("ftp://example.com", "does not look like a website address")]
+    [InlineData("localhost", "does not look like a website address")]
     public async Task A_bad_address_is_refused_with_a_message_a_person_can_act_on(string url, string expectedText)
     {
         var response = await _client.PostAsJsonAsync("/api/jobs", new CreateJobRequest(url, null, null));

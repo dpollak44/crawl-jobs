@@ -19,11 +19,12 @@ docker compose up --build
 | UI                                  | http://localhost:3000              |
 | API + interactive docs              | http://localhost:8080/swagger      |
 | API health (checks DB and broker)   | http://localhost:8080/health       |
-| Worker health                       | http://localhost:8081/health       |
+| Worker health | `docker compose exec worker wget -qO- http://localhost:8081/health` (no host port, so workers can be scaled) |
 | RabbitMQ management (guest / guest) | http://localhost:15672             |
 | Postgres                            | localhost:5433 (crawler / crawler) |
 
-Try it: paste `https://quotes.toscrape.com/` into the UI with depth 1. It finishes in about ten seconds.
+Try it: type `quotes.toscrape.com` into the UI with depth 1 (no scheme needed; https is assumed). It finishes
+in about ten seconds. More workers: `docker compose up --scale worker=3`; nothing else changes (see "Scaling").
 
 Run the tests (no Docker needed; they use SQLite in memory and a fake internet):
 
@@ -62,7 +63,7 @@ Local development without containers: `docker compose up db broker`, then `dotne
 | `src/Crawler.Api`            | REST endpoints, validation, request/response contracts. Thin.                                                                                                                               |
 | `src/Crawler.Worker`         | Fetching, redirect handling, the page processor, the queue consumer. Thin; borrows the rules.                                                                                               |
 | `src/web`                    | React + Vite + TypeScript. Three screens.                                                                                                                                                   |
-| `tests/*`                    | 66 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
+| `tests/*`                    | 78 tests: rules; API over real HTTP against SQLite; the worker's whole page step against fixture HTML with a fake internet and an in-memory queue.                                          |
 
 Dependencies point one way: Domain ← Infrastructure ← API / Worker. The crawl logic can be tested, and
 replaced, without starting anything.
@@ -88,6 +89,9 @@ Errors follow Problem Details: `400` names the field and says what to change; `4
   uniqueness rule in the database.
 - **Same site** (`SiteScope`): same host, ignoring a leading `www.` and ignoring the scheme. Subdomains are
   outside by default (the brief defines the domain as the host); `Crawl:IncludeSubdomains` flips that.
+  A same-site link spelled with the other scheme or with/without `www.` is rewritten to the job's own scheme
+  and host before it becomes a page, so one page is one row however it was linked. The edge keeps the link
+  as written.
 - **Depth**: the starting page is depth 0; default max depth 2 fetches three levels.
 - **Links counted** for the ratio: every `<a href>`, normalized, de-duplicated; `mailto:` / `tel:` /
   `javascript:` ignored; links to the page itself ignored. Every outgoing link is stored as an edge,
@@ -117,6 +121,7 @@ One message type, `CrawlPageMessage`, JSON on RabbitMQ, persistent:
 ```
 
 Properties: `messageId` = `pageId:attempt`, `correlationId` = `jobId`, `contentType` = `application/json`.
+Publishing uses broker confirms: "published" means the broker has taken responsibility for the message.
 It carries ids, not state. One message per page, not per job: several workers can share a job, progress is
 real, and the idempotency requirement means something.
 
@@ -133,13 +138,23 @@ real, and the idempotency requirement means something.
   that message is retried and the second pass finds the rows already present.
 - **Sweeper.** A worker that dies after committing a page but before publishing its children would leave
   those children `Queued` with no message in flight. Every 60 s each worker re-publishes any page that has
-  sat `Queued` for more than 120 s on a job that is still running. A page that was merely slow gets a
-  duplicate message, which is ignored by design. Test:
+  had no message sent for more than 120 s on a job that is still running, stamping the page first so two
+  workers sweeping at once do not both re-send it. A page that was merely slow gets one duplicate message,
+  which is ignored by design. Test:
   `PageProcessorTests.The_sweeper_republishes_pages_left_queued_too_long_on_running_jobs_only`.
-- The page cap is a counter on the job row, guarded by a concurrency token, raised only while below the
-  cap: two workers cannot both slip past 200.
+- The page cap is a counter on the job row raised only by one conditional `UPDATE … SET PagesDiscovered =
+  PagesDiscovered + n WHERE PagesDiscovered + n <= MaxPages`, inside the same transaction as the new rows, so
+  several workers can reserve at once and the sum can never exceed the cap. The job's status is a concurrency
+  token, so a worker holding a stale copy can never overwrite a canceled or failed job.
 
-Test: `PageProcessorTests.Delivering_the_same_message_twice_creates_no_duplicate_rows`.
+**The rule behind all of it: every saved job has either a recoverable next step or a recorded final outcome.**
+A parent page is acked only after its children are published, so if the broker goes away while children are
+being scheduled, the parent is redelivered on recovery and the duplicate path re-publishes any child still
+`Queued` (`RescheduleQueuedChildrenAsync`); that case is not a stall. A worker that dies after the ack is
+covered by the sweeper. A broker outage at the moment a job is created marks the job `Failed` with the reason.
+
+Tests: `PageProcessorTests.Delivering_the_same_message_twice_creates_no_duplicate_rows`,
+`RoutingTests.An_infrastructure_outage_waits_without_spending_an_attempt_however_many_times`.
 
 ### Retry policy
 
@@ -147,8 +162,9 @@ Two different failures, handled differently:
 
 | Failure                                                                                                      | Who retries                      | Policy                                                                                                                                                                   | Then                                                                                                           |
 | ------------------------------------------------------------------------------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| The target website is slow or down (timeout, 5xx, connection refused)                                        | HTTP client (resilience handler) | 10 s per attempt, 2 retries with backoff and jitter, circuit breaker                                                                                                     | Page recorded as `Failed` with the reason; the job continues. If the starting page fails, the job is `Failed`. |
-| Our own infrastructure (database unreachable, unique-index race, concurrency conflict, unexpected exception) | Message pipeline                 | Republished to `crawl.pages.retry` with `attempt + 1`; the retry queue holds it 5 s (`x-message-ttl`) then dead-letters it back onto the work exchange; up to 3 attempts | Page marked `Failed` ("gave up after 3 attempts"), job completion re-checked, message to the dead-letter queue |
+| The target website is slow or down (timeout on headers or body, 5xx, 408, 429, connection refused) | HTTP client (`FetchPipeline`) | 10 s per attempt, 2 retries with backoff and jitter, a total timeout, a separate clock on the body read. No circuit breaker: one would be shared by every site, so a single dead site would stop every job; a per-host breaker is next | Page recorded as `Failed` with the reason; the job continues. If the starting page fails, the job is `Failed`. |
+| Our own infrastructure **unreachable** (Postgres or RabbitMQ down: connection refused, socket timeout, broker closed) | Message pipeline | Republished to `crawl.pages.retry` with the **same** attempt number, so the message waits at the 5 s cadence until the outage ends. An outage never spends the attempt budget and never dead-letters healthy pages. If the broker itself is down, the message is handed back to the queue unacked |
+| A one-off failure in our own code (unique-index race between workers, concurrency conflict, unexpected exception) | Message pipeline | Republished to `crawl.pages.retry` with `attempt + 1`; the retry queue holds it 5 s (`x-message-ttl`) then dead-letters it back onto the work exchange; up to 3 attempts | Page marked `Failed` ("gave up after 3 attempts"), job completion re-checked, message to the dead-letter queue |
 
 "Transient" means: it may succeed if tried again without anyone changing anything. A 404 on a page is not
 transient; a database connection reset is.
@@ -187,6 +203,14 @@ Everything a user reads is indexed by `JobId` first.
 Schema is created on boot with `EnsureCreated` (take-home scale). Production would run EF migrations as a
 release step; see next steps.
 
+## Scaling
+
+The API is stateless and the worker is a plain consumer, so `docker compose up --scale worker=3` runs three
+workers on the same queue with no code change. What makes that safe: the unique keys on pages and edges, the
+conditional cap reservation, the status concurrency token on jobs, and the sweeper stamping pages before it
+re-sends them. Within one worker, `RabbitMq:Prefetch` messages are processed concurrently. All five containers
+restart automatically unless stopped.
+
 ## Observability
 
 - Structured JSON logs outside Development. Every worker log line carries `JobId`, `PageId` and `Attempt`
@@ -204,7 +228,7 @@ release step; see next steps.
 | `Crawl:DefaultMaxPages` / `MaxPagesLimit`                                      | 200 / 1000                       | Default and ceiling for a job's page cap         |
 | `Crawl:IncludeSubdomains`                                                      | false                            | Treat `blog.example.com` as inside `example.com` |
 | `Crawl:FetchTimeoutSeconds` / `FetchRetries` / `MaxRedirects` / `MaxBodyBytes` | 10 / 2 / 5 / 2 MB                | Fetching limits                                  |
-| `RabbitMq:RetryDelayMs` / `MaxAttempts` / `Prefetch`                           | 5000 / 3 / 8                     | Message retry policy and worker concurrency      |
+| `RabbitMq:RetryDelayMs` / `MaxAttempts` / `Prefetch`                           | 5000 / 3 / 8                     | Message retry policy; `Prefetch` is also the number of messages one worker handles concurrently |
 | `Crawl:SweepIntervalSeconds` / `StuckAfterSeconds` | 60 / 120 | How often, and after how long, a `Queued` page with no message in flight is re-published |
 | `Cors:Origins`                                                                 | `http://localhost:3000`, `:5173` | Addresses the UI may call from                   |
 | `Paging:DefaultPageSize` / `MaxPageSize`                                       | 20 / 100                         | History paging                                   |
@@ -244,9 +268,6 @@ release step; see next steps.
 - **Outbox.** Write the message into the database in the same transaction as the job or page row and relay
   it, so even a broker outage at job creation cannot lose a job. The sweeper already recovers a lost message
   after creation; the outbox removes the up-to-120-second delay and the `Failed` outcome at creation.
-- **Atomic cap counter.** The page cap uses an optimistic concurrency token, so two workers discovering
-  children on the same job at the same moment cost one retry (5 s). Under heavy parallelism the counter
-  should become a single `UPDATE … SET pages_discovered = pages_discovered + 1 WHERE pages_discovered < max`.
 - Scheduled reprocessing of the dead-letter queue with a cap, and an alert rule on the Error log line.
 - EF migrations as a release step; Testcontainers for Postgres and RabbitMQ in CI.
 - Live progress over SSE; the web container replaced by a CDN; the API behind a gateway.

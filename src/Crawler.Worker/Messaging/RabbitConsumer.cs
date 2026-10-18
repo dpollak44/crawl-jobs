@@ -61,31 +61,52 @@ public sealed class RabbitConsumer(
                 await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: true, CancellationToken.None); // shutting down: give it back
                 return;
             }
+            catch (Exception ex) when (FailureKind.IsInfrastructureUnavailable(ex))
+            {
+                logger.LogWarning(ex, "Infrastructure unavailable while processing page {PageId}; message will wait", message.PageId);
+                result = new ProcessResult(ProcessOutcome.InfrastructureUnavailable, ex.Message);
+            }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Unexpected failure processing page {PageId}; treating as transient", message.PageId);
                 result = new ProcessResult(ProcessOutcome.Transient, ex.Message);
             }
 
-            switch (result.Outcome)
+            switch (ConsumerRouting.Decide(result, message, connection.Options.MaxAttempts))
             {
-                case ProcessOutcome.Done:
+                case RouteAction.Ack:
                     await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
                     break;
 
-                case ProcessOutcome.Transient when message.Attempt < connection.Options.MaxAttempts:
+                case RouteAction.RetrySameAttempt:
+                    // Wait out the outage at the retry cadence without spending an attempt. If the broker itself is
+                    // down the republish throws; then hand the message back to the queue unacked instead.
+                    try
+                    {
+                        await publisher.PublishAsync(RabbitTopology.RetryExchange, message, stoppingToken);
+                        await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger.LogWarning(ex, "Broker unavailable too; returning page {PageId} to the queue", message.PageId);
+                        await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: true, CancellationToken.None);
+                    }
+
+                    break;
+
+                case RouteAction.RetryNextAttempt:
                     logger.LogWarning("Transient failure on attempt {Attempt}: {Reason}; retrying in {Delay} ms", message.Attempt, result.Reason, connection.Options.RetryDelayMs);
                     await publisher.PublishAsync(RabbitTopology.RetryExchange, message with { Attempt = message.Attempt + 1 }, stoppingToken);
                     await channel.BasicAckAsync(deliveryTag, multiple: false, stoppingToken);
                     break;
 
-                case ProcessOutcome.Transient:
+                case RouteAction.GiveUpAndDeadLetter:
                     logger.LogError("Giving up on page {PageId} after {Attempt} attempts: {Reason}; dead-lettering", message.PageId, message.Attempt, result.Reason);
                     await GiveUpAsync(message, result.Reason ?? "unknown", stoppingToken);
                     await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, stoppingToken);
                     break;
 
-                case ProcessOutcome.Poison:
+                case RouteAction.DeadLetter:
                     logger.LogError("Poison message for page {PageId}: {Reason}; dead-lettering", message.PageId, result.Reason);
                     await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, stoppingToken);
                     break;
@@ -108,7 +129,7 @@ public sealed class RabbitConsumer(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, "Could not record the give-up for page {PageId}; the job may stay Running until the page is swept", message.PageId);
+            logger.LogError(ex, "Could not record the give-up for page {PageId}; the sweeper will re-send it once the database is back", message.PageId);
         }
     }
 

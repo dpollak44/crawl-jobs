@@ -14,7 +14,7 @@ A job-based crawler as two .NET 8 services and a React UI, run with one `docker 
   fetch); a message that exhausts its retries still leaves the page `Failed` and the job in a final state.
 - **Postgres** with three tables and indexes shaped by the queries the system actually runs.
 - **UI**: start, job details with polling, progress and tree, history; clear loading and error states.
-- **66 tests**: the rules in isolation, the API over real HTTP, and the worker's whole page step against
+- **78 tests**: the rules in isolation, the API over real HTTP, and the worker's whole page step against
   fixture HTML with a fake internet and an in-memory queue, including the same message delivered twice.
 - Structured logs with job and page ids, health endpoints for both services, CI that builds and tests.
 
